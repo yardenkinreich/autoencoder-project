@@ -11,10 +11,14 @@ python = ">=3.10,<3.12"
 numpy = "*"
 pandas = "*"
 matplotlib = "*"
-pytorch = "*"              # PyTorch
+pytorch = "*"
 scikit-learn = "*"
-jupyter = "*"            # Optional, for notebooks
+jupyter = "*"
 quarto = "*"
+rasterio = "*"
+opencv = "*"
+pyproj= "*"
+scipy = "*"
 
 [pypi-dependencies]
 snakemake = "*"

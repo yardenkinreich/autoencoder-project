@@ -1,0 +1,22 @@
+[workspace]
+channels = ["conda-forge"]
+name = "autoencoder_project"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = ">=3.10,<3.12"
+numpy = "*"
+pandas = "*"
+matplotlib = "*"
+pytorch = "*"              # PyTorch
+scikit-learn = "*"
+jupyter = "*"            # Optional, for notebooks
+quarto = "*"
+
+[pypi-dependencies]
+snakemake = "*"
+torchvision = "*"
+torch = "*"

@@ -1,0 +1,9 @@
+.pixi/
+__pycache__/
+*.pyc
+
+*.ipynb_checkpoints
+
+data/raw
+.DS_Store
+.vscode/

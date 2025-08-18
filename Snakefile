@@ -1,39 +1,32 @@
-# Snakefile
 rule all:
     input:
         "results/train_val_loss.png",
         "results/test_metrics.json",
-        "results/clustering/embeddings.png"
+        "results/clustering/embeddings.png",
         "data/processed/craters_images.npy",
         "data/processed/craters_metadata.csv"
-
-rule download_data:
-    output:
-        "data/raw/dataset.zip"
-    script:
-        "src/data/download.py"
 
 rule preprocess_craters:
     input:
         map_file="data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif",
         craters_csv="data/raw/lunar_crater_database_robbins_2018.csv"
     output:
-        crops_dir=directory("data/processed/crops"),
+        crops_dir=directory("data/processed"),
         np_output="data/processed/craters.npy",
         metadata_output="data/processed/metadata.csv"
-     params:
-        output_dir="data/processed/crops",
+    params:
+        output_dir="data/processed",
         min_diameter=3.0,
         max_diameter=10.0,
         lat_min=-60,
         lat_max=60,
         offset=0.5,
-        craters_to_output=1000,
+        craters_to_output=10000,
         dst_height=100,
         dst_width=100
     shell:
         """
-        python scripts/process.py \
+        PYTHONPATH=$(pwd) python src/data/preprocess.py \
             --map_file {input.map_file} \
             --craters_csv {input.craters_csv} \
             --output_dir {params.output_dir} \
@@ -50,27 +43,35 @@ rule preprocess_craters:
             --dst_width {params.dst_width}
         """
 
-rule preprocess_data:
+rule train_autoencoder:
     input:
-        "data/raw/dataset.zip"
+        npy="data/processed/craters.npy"
     output:
-        directory("data/processed/")
-    script:
-        "src/data/preprocess.py"
-
-rule train_model:
-    input:
-        data="data/processed/"
-    output:
-        model="models/autoencoder.pt",
-        plot="results/train_val_loss.png"
-    script:
-        "src/train/train.py"
+        model="models/conv_autoencoder.pth",
+        loss="models/loss_curve.png",
+        latent="models/latent_vectors.npy"
+    params:
+        epochs=50,
+        batch_size=32,
+        latent_dim=6,
+        lr=1e-3
+    shell:
+        """
+        python src/train/train.py \
+            --input {input.npy} \
+            --model_output {output.model} \
+            --loss_plot {output.loss} \
+            --latent_output {output.latent} \
+            --epochs {params.epochs} \
+            --batch_size {params.batch_size} \
+            --latent_dim {params.latent_dim} \
+            --lr {params.lr}
+        """
 
 rule evaluate_model:
     input:
-        model="models/autoencoder.pt",
-        data="data/processed/"
+        model="models/conv_autoencoder.pth",
+        data="data/processed/craters.npy"
     output:
         "results/test_metrics.json"
     script:
@@ -78,9 +79,23 @@ rule evaluate_model:
 
 rule cluster_embeddings:
     input:
-        model="models/autoencoder.pt",
-        data="data/processed/"
+        latent_vectors="results/latent_vectors.npy",      # saved from training
+        metadata_csv="data/processed/metadata.csv",      # contains crater IDs
+        images_dir="data/processed"                       # for plotting images
     output:
-        "results/clustering/embeddings.png"
-    script:
-        "src/cluster/cluster.py"
+        latent_output="results/clustering/latent_with_labels.npy",
+        dot_plot="results/clustering/embeddings_dots.png",
+        image_plot="results/clustering/embeddings_images.png"
+    params:
+        n_clusters=3                                      # number of clusters
+    shell:
+        """
+        python src/cluster/cluster.py \
+            --latent_input {input.latent_vectors} \
+            --metadata_csv {input.metadata_csv} \
+            --images_dir {input.images_dir} \
+            --latent_output {output.latent_output} \
+            --dot_plot {output.dot_plot} \
+            --image_plot {output.image_plot} \
+            --n_clusters {params.n_clusters}
+        """

@@ -1,0 +1,55 @@
+Assuming unrestricted shared filesystem usage.
+None
+host: Yardens-MacBook-Air.local
+Building DAG of jobs...
+Using shell: /bin/bash
+Provided cores: 1 (use --cores to define parallelism)
+Rules claiming more threads will be scaled down.
+Job stats:
+job                   count
+------------------  -------
+preprocess_craters        1
+total                     1
+
+Select jobs to execute...
+Execute 1 jobs...
+[Mon Aug 18 12:07:38 2025]
+localrule preprocess_craters:
+    input: data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif, data/raw/lunar_crater_database_robbins_2018.csv
+    output: data/processed, data/processed/craters.npy, data/processed/metadata.csv
+    jobid: 0
+    reason: Missing output files: data/processed/craters.npy
+    resources: tmpdir=/var/folders/26/0gb4lb9s7dj4_73mtd9_59x40000gn/T
+RuleException:
+CalledProcessError in file "/Users/yardenkinreich/Documents/Projects/Masters/autoencoder_project/Snakefile", line 28:
+Command 'set -euo pipefail;  
+        python src/preprocess.py             --map_file data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif             --craters_csv data/raw/lunar_crater_database_robbins_2018.csv             --output_dir data/processed             --np_output_path data/processed/craters.npy             --info_output_path data/processed/metadata.csv             --min_diameter 3.0             --max_diameter 10.0             --latitude_bounds -60 60             --offset 0.5             --craters_to_output 10000             --save_crops             --save_np_array             --dst_height 100             --dst_width 100' returned non-zero exit status 2.
+[Mon Aug 18 12:07:38 2025]
+Error in rule preprocess_craters:
+    message: None
+    jobid: 0
+    input: data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif, data/raw/lunar_crater_database_robbins_2018.csv
+    output: data/processed, data/processed/craters.npy, data/processed/metadata.csv
+    shell:
+        
+        python src/preprocess.py             --map_file data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif             --craters_csv data/raw/lunar_crater_database_robbins_2018.csv             --output_dir data/processed             --np_output_path data/processed/craters.npy             --info_output_path data/processed/metadata.csv             --min_diameter 3.0             --max_diameter 10.0             --latitude_bounds -60 60             --offset 0.5             --craters_to_output 10000             --save_crops             --save_np_array             --dst_height 100             --dst_width 100
+        
+        (command exited with non-zero exit code)
+Removing output files of failed job preprocess_craters since they might be corrupted:
+data/processed
+Shutting down, this might take some time.
+Exiting because a job execution failed. Look below for error messages
+[Mon Aug 18 12:07:39 2025]
+Error in rule preprocess_craters:
+    message: None
+    jobid: 0
+    input: data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif, data/raw/lunar_crater_database_robbins_2018.csv
+    output: data/processed, data/processed/craters.npy, data/processed/metadata.csv
+    shell:
+        
+        python src/preprocess.py             --map_file data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif             --craters_csv data/raw/lunar_crater_database_robbins_2018.csv             --output_dir data/processed             --np_output_path data/processed/craters.npy             --info_output_path data/processed/metadata.csv             --min_diameter 3.0             --max_diameter 10.0             --latitude_bounds -60 60             --offset 0.5             --craters_to_output 10000             --save_crops             --save_np_array             --dst_height 100             --dst_width 100
+        
+        (command exited with non-zero exit code)
+Complete log(s): /Users/yardenkinreich/Documents/Projects/Masters/autoencoder_project/.snakemake/log/2025-08-18T120738.850210.snakemake.log
+WorkflowError:
+At least one job did not complete successfully.

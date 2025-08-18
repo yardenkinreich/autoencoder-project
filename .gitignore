@@ -4,9 +4,16 @@ __pycache__/
 
 *.ipynb_checkpoints
 
+results/
+notebooks/
+data/
 data/raw
 data/processed
 data/test_processing/test_craters.npy
 .DS_Store
 .vscode/
 data/processed/*.npy
+code_scribbles
+.snakefile
+.snakefile.lock
+.snakemake/

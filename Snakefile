@@ -57,7 +57,7 @@ rule train_autoencoder:
         lr=1e-3
     shell:
         """
-        python src/train/train.py \
+        PYTHONPATH=$(pwd) python src/train/train.py \
             --input {input.npy} \
             --model_output {output.model} \
             --loss_plot {output.loss} \
@@ -79,7 +79,7 @@ rule evaluate_model:
 
 rule cluster_embeddings:
     input:
-        latent_vectors="results/latent_vectors.npy",      # saved from training
+        latent_vectors="models/latent_vectors.npy",      # saved from training
         metadata_csv="data/processed/metadata.csv",      # contains crater IDs
         images_dir="data/processed"                       # for plotting images
     output:
@@ -90,7 +90,7 @@ rule cluster_embeddings:
         n_clusters=3                                      # number of clusters
     shell:
         """
-        python src/cluster/cluster.py \
+        PYTHONPATH=$(pwd) python src/cluster/cluster.py \
             --latent_input {input.latent_vectors} \
             --metadata_csv {input.metadata_csv} \
             --images_dir {input.images_dir} \

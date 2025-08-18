@@ -6,27 +6,23 @@ class ConvAutoencoder(nn.Module):
         super(ConvAutoencoder, self).__init__()
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 16, 3, stride=2, padding=1),  # 100x100 -> 50x50
+            nn.Conv2d(1, 16, 3, stride=2, padding=1),   # 100 -> 50
             nn.ReLU(True),
-            nn.Conv2d(16, 32, 3, stride=2, padding=1), # 50x50 -> 25x25
-            nn.ReLU(True),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1), # 25x25 -> 13x13
+            nn.Conv2d(16, 32, 3, stride=2, padding=1),  # 50 -> 25
             nn.ReLU(True),
             nn.Flatten(),
-            nn.Linear(64*13*13, latent_dim)
+            nn.Linear(32 * 25 * 25, latent_dim)
         )
-        
+
         # Decoder
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 64*13*13),
+            nn.Linear(latent_dim, 32 * 25 * 25),
             nn.ReLU(True),
-            nn.Unflatten(1, (64, 13, 13)),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1), # 13x13 -> 25x25
+            nn.Unflatten(1, (32, 25, 25)),
+            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1), # 25 -> 50
             nn.ReLU(True),
-            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1), # 25x25 -> 50x50
-            nn.ReLU(True),
-            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),  # 50x50 -> 100x100
-            nn.Sigmoid()  # normalize output 0-1
+            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),  # 50 -> 100
+            nn.Sigmoid()
         )
 
     def forward(self, x):

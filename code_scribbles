@@ -1,0 +1,17 @@
+python -m src.data.preprocess \
+  --map_file data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif \
+  --craters_csv data/raw/robins_filtered_for_daniel.csv \
+  --output_dir data/test_processing \
+  --np_output_path data/test_processing/test_craters.npy \
+  --info_output_path data/test_processing/test_info.csv \
+  --min_diameter 3 \
+  --max_diameter 10 \
+  --latitude_bounds -60 60 \
+  --offset 0.5 \
+  --craters_to_output 5 \
+  --save_crops \
+  --save_np_array
+
+
+pixi run python test_processing.py
+

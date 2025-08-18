@@ -1,0 +1,26 @@
+Assuming unrestricted shared filesystem usage.
+None
+host: Yardens-MacBook-Air.local
+Building DAG of jobs...
+Using shell: /bin/bash
+Provided cores: 1 (use --cores to define parallelism)
+Rules claiming more threads will be scaled down.
+Job stats:
+job                   count
+------------------  -------
+preprocess_craters        1
+total                     1
+
+Select jobs to execute...
+Execute 1 jobs...
+[Mon Aug 18 12:16:23 2025]
+localrule preprocess_craters:
+    input: data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif, data/raw/lunar_crater_database_robbins_2018.csv
+    output: data/processed, data/processed/craters.npy, data/processed/metadata.csv
+    jobid: 0
+    reason: Missing output files: data/processed/craters.npy
+    resources: tmpdir=/var/folders/26/0gb4lb9s7dj4_73mtd9_59x40000gn/T
+[Mon Aug 18 12:16:35 2025]
+Finished jobid: 0 (Rule: preprocess_craters)
+1 of 1 steps (100%) done
+Complete log(s): /Users/yardenkinreich/Documents/Projects/Masters/autoencoder_project/.snakemake/log/2025-08-18T121623.629387.snakemake.log

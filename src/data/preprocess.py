@@ -6,7 +6,6 @@ import rasterio
 import matplotlib.pyplot as plt
 from src.helper_functions import *
 
-
 def load_and_filter_craters(craters_csv, min_diameter, max_diameter, latitude_bounds, craters_to_output):
     craters = pd.read_csv(craters_csv)
     filtered = craters[

@@ -1,10 +1,3 @@
-rule all:
-    input:
-        "results/train_val_loss.png",
-        "results/test_metrics.json",
-        "results/clustering/embeddings.png",
-        "data/processed/craters_images.npy",
-        "data/processed/craters_metadata.csv"
 
 rule preprocess_craters:
     input:
@@ -47,9 +40,9 @@ rule train_autoencoder:
     input:
         npy="data/processed/craters.npy"
     output:
-        model="models/conv_autoencoder.pth",
-        loss="models/loss_curve.png",
-        latent="models/latent_vectors.npy"
+        model="models/conv_autoencoder_6.pth",
+        loss="models/loss_curve_6.png",
+        latent="models/latent_vectors_6.npy"
     params:
         epochs=50,
         batch_size=32,
@@ -68,34 +61,59 @@ rule train_autoencoder:
             --lr {params.lr}
         """
 
-rule evaluate_model:
+rule encode_latents:
     input:
-        model="models/conv_autoencoder.pth",
-        data="data/processed/craters.npy"
+        imgs_dir="data/raw/craters_for_danny",
+        model="models/conv_autoencoder_6.pth"
     output:
-        "results/test_metrics.json"
-    script:
-        "src/test/evaluate.py"
-
-rule cluster_embeddings:
-    input:
-        latent_vectors="models/latent_vectors.npy",      # saved from training
-        metadata_csv="data/processed/metadata.csv",      # contains crater IDs
-        images_dir="data/processed"                       # for plotting images
-    output:
-        latent_output="results/clustering/latent_with_labels.npy",
-        dot_plot="results/clustering/embeddings_dots.png",
-        image_plot="results/clustering/embeddings_images.png"
+        latents="results/latents_clustering_cnn_6.npy",
+        states="results/states.npy"
     params:
-        n_clusters=3                                      # number of clusters
+        bottleneck=6
     shell:
         """
-        PYTHONPATH=$(pwd) python src/cluster/cluster.py \
-            --latent_input {input.latent_vectors} \
-            --metadata_csv {input.metadata_csv} \
-            --images_dir {input.images_dir} \
-            --latent_output {output.latent_output} \
-            --dot_plot {output.dot_plot} \
-            --image_plot {output.image_plot} \
-            --n_clusters {params.n_clusters}
+        PYTHONPATH=$(pwd) python src/cluster/cluster.py encode \
+            --imgs-dir {input.imgs_dir} \
+            --model {input.model} \
+            --bottleneck {params.bottleneck} \
+            --out-latents {output.latents} \
+            --out-states {output.states}
+        """
+
+rule plot_latent_dots:
+    input:
+        latents="results/latents_clustering_cnn_6.npy",
+        states="results/states.npy"
+    output:
+        "results/clustering_cnn_6_dots.png"
+    params:
+        technique="pca",
+        model_name = "CNN_6"
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/cluster/cluster.py plot-dots \
+            --latents {input.latents} \
+            --states {input.states} \
+            --out-png {output} \
+            --model-name {params.model_name} \
+            --technique {params.technique}
+        """
+
+rule plot_latent_imgs:
+    input:
+        latents="results/latents_clustering_cnn_6.npy",
+        imgs_dir="data/raw/craters_for_danny"
+    output:
+        "results/clustering_cnn_6_imgs.png"
+    params:
+        technique="pca",
+        model_name = "CNN_6"
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/cluster/cluster.py plot-imgs \
+            --latents {input.latents} \
+            --imgs-dir {input.imgs_dir} \
+            --out-png {output} \
+            --model-name {params.model_name} \
+            --technique {params.technique}
         """

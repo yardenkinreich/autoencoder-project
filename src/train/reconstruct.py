@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from src.train.train import ConvAutoencoder  # import your class (adjust path if needed)
+from src.train.train import ConvAutoencoder  
 
 def save_reconstructions(model_path, npy_path, device="cpu", filename="models/reconstructions.png", num_images=8):
     # Load data
@@ -29,6 +29,7 @@ def save_reconstructions(model_path, npy_path, device="cpu", filename="models/re
 
     # Plot originals and reconstructions
     fig, axes = plt.subplots(2, num_images, figsize=(num_images*2, 4))
+    fig.suptitle("Original Images and Reconstructions", fontsize=16)
     for i in range(num_images):
         axes[0, i].imshow(inputs[i].cpu().squeeze(), cmap="gray")
         axes[0, i].axis("off")
@@ -41,7 +42,8 @@ def save_reconstructions(model_path, npy_path, device="cpu", filename="models/re
 
 if __name__ == "__main__":
     save_reconstructions(
-        model_path="models/conv_autoencoder.pth",
+        model_path="models/conv_autoencoder_6.pth",
         npy_path="data/processed/craters.npy",
-        device="cpu"
+        device="cpu",
+        filename="models/reconstructions_6.png"
     )

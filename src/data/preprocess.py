@@ -60,6 +60,10 @@ def process_and_save_crater_crops(filtered_craters, map_file, output_dir, offset
                 dst_height,
                 dst_width
             )
+            
+            # Flip crater so shadow is always on the right
+            crater_img = flip_crater(crater_img)
+
             craters_list.append((crater_img / 255).astype(np.float16))
 
             if save_crops:

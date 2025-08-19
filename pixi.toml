@@ -23,4 +23,8 @@ scipy = "*"
 [pypi-dependencies]
 snakemake = "*"
 torchvision = "*"
+torchsummary = "*"
 torch = "*"
+jupyterlab = "*"
+jupyter="*"
+pyyaml = "*"

@@ -1,7 +1,7 @@
 [workspace]
 channels = ["conda-forge"]
 name = "autoencoder_project"
-platforms = ["osx-arm64"]
+platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
@@ -13,12 +13,13 @@ pandas = "*"
 matplotlib = "*"
 pytorch = "*"
 scikit-learn = "*"
-jupyter = "*"
+jupyter = ">=1.1.1,<2"
 quarto = "*"
 rasterio = "*"
 opencv = "*"
 pyproj= "*"
 scipy = "*"
+pyyaml = ">=6.0.2,<7"
 
 [pypi-dependencies]
 snakemake = "*"

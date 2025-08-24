@@ -15,3 +15,6 @@ python -m src.data.preprocess \
 
 pixi run python test_processing.py
 
+
+ ssh 132.66.136.86 
+

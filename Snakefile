@@ -14,7 +14,7 @@ rule preprocess_craters:
         lat_min=-60,
         lat_max=60,
         offset=0.5,
-        craters_to_output=10000,
+        craters_to_output=50000,
         dst_height=100,
         dst_width=100
     shell:
@@ -40,14 +40,15 @@ rule train_autoencoder:
     input:
         npy="data/processed/craters.npy"
     output:
-        model="models/conv_autoencoder_6.pth",
-        loss="models/loss_curve_6.png",
-        latent="models/latent_vectors_6.npy"
+        model="models/conv_autoencoder_20_l2.pth",
+        loss="models/loss_curve_20_l2.png",
+        latent="models/latent_vectors_20_l2.npy"
     params:
-        epochs=50,
+        epochs= 50,
         batch_size=32,
-        latent_dim=6,
-        lr=1e-3
+        latent_dim=20,
+        lr=1e-5,
+        weight_decay=1e-5
     shell:
         """
         PYTHONPATH=$(pwd) python src/train/train.py \
@@ -58,18 +59,43 @@ rule train_autoencoder:
             --epochs {params.epochs} \
             --batch_size {params.batch_size} \
             --latent_dim {params.latent_dim} \
-            --lr {params.lr}
+            --lr {params.lr} \
+            --weight_decay {params.weight_decay}
         """
+
+
+rule reconstruct_craters:
+    input:
+        npy="data/processed/craters.npy",
+        model="models/conv_autoencoder_20_l2.pth"
+    output:
+        reconstructions="models/reconstructions_cnn_20_l2.png"
+    params:
+        device="cpu",
+        num_images=8,
+        latent_dim=20
+        
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/train/reconstruct.py \
+            --input {input.npy} \
+            --model {input.model} \
+            --device {params.device} \
+            --file_outq {output.reconstructions} \
+            --num_images {params.num_images} \
+            --latent_dim {params.latent_dim}
+        """
+
 
 rule encode_latents:
     input:
         imgs_dir="data/raw/craters_for_danny",
-        model="models/conv_autoencoder_6.pth"
+        model="models/conv_autoencoder_20_l2.pth"
     output:
-        latents="results/latents_clustering_cnn_6.npy",
+        latents="results/latents_clustering_cnn_20_l2.npy",
         states="results/states.npy"
     params:
-        bottleneck=6
+        bottleneck=20
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py encode \
@@ -82,13 +108,13 @@ rule encode_latents:
 
 rule plot_latent_dots:
     input:
-        latents="results/latents_clustering_cnn_6.npy",
+        latents="results/latents_clustering_cnn_20_l2.npy",
         states="results/states.npy"
     output:
-        "results/clustering_cnn_6_dots.png"
+        "results/clustering_cnn_20_l2_dots.png"
     params:
         technique="pca",
-        model_name = "CNN_6"
+        model_name = "CNN_20_l2"
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py plot-dots \
@@ -101,13 +127,13 @@ rule plot_latent_dots:
 
 rule plot_latent_imgs:
     input:
-        latents="results/latents_clustering_cnn_6.npy",
+        latents="results/latents_clustering_cnn_20_l2.npy",
         imgs_dir="data/raw/craters_for_danny"
     output:
-        "results/clustering_cnn_6_imgs.png"
+        "results/clustering_cnn_20_l2_imgs.png"
     params:
         technique="pca",
-        model_name = "CNN_6"
+        model_name = "CNN_20_l2"
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py plot-imgs \

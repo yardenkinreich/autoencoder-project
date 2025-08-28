@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from src.train.train import ConvAutoencoder  
+import argparse
 
 def save_reconstructions(model_path, npy_path, device="cpu", filename="models/reconstructions.png", num_images=8):
     # Load data
@@ -17,7 +18,7 @@ def save_reconstructions(model_path, npy_path, device="cpu", filename="models/re
     loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
 
     # Load model
-    model = ConvAutoencoder(latent_dim=6).to(device)
+    model = ConvAutoencoder(latent_dim=args.latent_dim).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
@@ -41,9 +42,20 @@ def save_reconstructions(model_path, npy_path, device="cpu", filename="models/re
     plt.close()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', required=True, help="Path to crater npy file")
+    parser.add_argument('--model', required=True, help="Path to trained model")
+    parser.add_argument('--device', default="cpu", help="Device to run the model on")
+    parser.add_argument('--latent_dim', type=int, default=6, help="Dimensionality of the latent space")
+    parser.add_argument('--file_outq', default="models/reconstructions.png", help="Path to save the reconstruction image")
+    parser.add_argument('--num_images', type=int, default=8, help="Number of images to reconstruct and display")
+    args = parser.parse_args()
+
+
     save_reconstructions(
-        model_path="models/conv_autoencoder_6.pth",
-        npy_path="data/processed/craters.npy",
-        device="cpu",
-        filename="models/reconstructions_6.png"
+        model_path=args.model,
+        npy_path=args.input,
+        device=args.device,
+        filename=args.file_outq,
+        num_images=args.num_images
     )

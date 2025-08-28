@@ -25,7 +25,7 @@ def main(args):
     # Model, loss, optimizer
     model = ConvAutoencoder(latent_dim=args.latent_dim).to(device)
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # Training loop
     train_losses = []
@@ -91,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--latent_dim', type=int, default=6)
     parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--val_split', type=float, default=0.2)
     args = parser.parse_args()
     main(args)

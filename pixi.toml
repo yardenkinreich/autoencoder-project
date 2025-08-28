@@ -1,5 +1,5 @@
 [workspace]
-channels = ["conda-forge"]
+channels = ["conda-forge","bioconda"]
 name = "autoencoder_project"
 platforms = ["linux-64"]
 version = "0.1.0"
@@ -20,6 +20,8 @@ opencv = "*"
 pyproj= "*"
 scipy = "*"
 pyyaml = ">=6.0.2,<7"
+snakemake = ">=9.9.0,<10"
+torchvision = ">=0.22.0,<0.23"
 
 [pypi-dependencies]
 snakemake = "*"

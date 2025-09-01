@@ -1,0 +1,87 @@
+---
+title: "Convolutional Neural Network Lunar Crater Identification - 20 Latent Variables & L2 Regulation"
+author: "Yarden Kinreich"
+format: pdf
+---
+
+# Project Overview
+
+This report summarizes the run of the CNN 20 Latent Variable with L2 Regulation pipeline, including training results, reconstructions, and clustering.
+
+
+## Dataset
+
+Crater database (Link to Download): 
+https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins
+Moon LRO LROC WAC Global Morphology Mosaic 100m (File):
+https://planetarymaps.usgs.gov/mosaic/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif
+
+
+## Preprocessing 
+
+1. Filter Robbin’s craters data-set by diameter and latitudes
+- 3km <diameter <10km
+- -60< latitude < 60
+
+2. Crop the craters images from the LRO mosaic by crater’s central coordinate and diameter
+- Coordinates projection translation between Robins database and LRO mosaic
+- image projection correction for round craters instead of elliptical
+3. Unfirming
+- All craters' shades flipped to be on the right side of the image
+- All craters’ images resized to 100X100 pixels
+
+
+## Pipeline Info
+
+```{python}
+#| label: model-summary
+#| cache: true
+#| echo: false
+
+%cd /home/yardenk/autoencoder_project
+
+import sys
+import os
+import numpy as np
+sys.path.append(os.path.abspath('src'))
+from torchsummary import summary
+from src.train.train import ConvAutoencoder
+
+# Example hyperparameters and dataset info
+num_examples =  len(np.load("data/processed/craters.npy"))
+train_val_split = 0.2
+latent_dim = 20
+epochs = 50
+batch_size = 32
+
+print(f"Number of examples used: {num_examples}")
+print(f"Autoencoder latent dimension: {latent_dim}")
+print(f"Used {train_val_split} portion for validation")
+print(f"Training epochs: {epochs}")
+print(f"Batch size: {batch_size}")
+print("Used L2 regulation, in ADAM optimizer")
+
+model = ConvAutoencoder(latent_dim=latent_dim)
+summary(model, (1, 100, 100))
+```
+
+
+
+## Train and Validation Loss Plot
+
+![](../models/loss_curve_20_l2.png){width=100%}
+
+
+## Model Reconstruction Figure
+
+![](../models/reconstructions_cnn_20_l2.png){width=100%}
+
+
+## Plot Clustering of PCA on Latent Variables: Julie D. Stopar Craters with Labels
+
+![](../results/clustering_cnn_20_l2_dots.png){width=100%}
+
+
+## Plot Clustering of PCA on Latent Variables: Julie D. Stopar Craters Images
+
+![](../results/clustering_cnn_20_l2_imgs.png){width=100%}

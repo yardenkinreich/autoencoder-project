@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import torch.nn as nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 from src.models.autoencoder import ConvAutoencoder
 
@@ -30,6 +31,13 @@ def main(args):
     # Training loop
     train_losses = []
     val_losses = []
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",        # "min" for val_loss
+        factor= args.lr_factor,        # reduce LR by half
+        patience = args.lr_patience,     # wait 5 epochs before reducing
+        min_lr = args.min_lr     # minimum learning rate
+        )
 
     for epoch in range(args.epochs):
         model.train()
@@ -56,7 +64,11 @@ def main(args):
         epoch_val_loss = running_val_loss / val_size
         val_losses.append(epoch_val_loss)
 
-        print(f"Epoch [{epoch+1}/{args.epochs}] - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}")
+        scheduler.step(epoch_val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+
+        print(f"Epoch [{epoch+1}/{args.epochs}] - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}", 
+              f"LR: {current_lr:.2e}")
 
     # Save model and loss plot
     os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
@@ -93,5 +105,8 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--val_split', type=float, default=0.2)
+    parser.add_argument('--lr_patience', type=int, default=5, help="Epochs to wait before reducing LR")
+    parser.add_argument('--min_lr', type=float, default=1e-8, help="Minimum learning rate")
+    parser.add_argument('--lr_factor', type=float, default=0.5, help="Factor to reduce LR by")
     args = parser.parse_args()
     main(args)

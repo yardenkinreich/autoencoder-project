@@ -5,7 +5,6 @@ __pycache__/
 *.ipynb_checkpoints
 
 results/
-notebooks/
 data/
 data/raw
 data/processed

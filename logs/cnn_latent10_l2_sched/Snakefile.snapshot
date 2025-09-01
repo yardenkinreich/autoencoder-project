@@ -3,7 +3,7 @@ import datetime
 import shutil
 
 # --- Define the run name once ---
-RUN_NAME = "cnn_latent10_l2_sched_pca"
+RUN_NAME = "cnn_latent10_l2_sched"
 # Or make it dynamic with timestamp
 # RUN_NAME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 

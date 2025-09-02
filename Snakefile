@@ -3,7 +3,7 @@ import datetime
 import shutil
 
 # --- Define the run name once ---
-RUN_NAME = "cnn_latent10_l2_sched_pca"
+RUN_NAME = "cnn_latent40_l2_sched_pca"
 # Or make it dynamic with timestamp
 # RUN_NAME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -21,7 +21,9 @@ if os.path.exists("Snakefile"):
     shutil.copy("Snakefile", f"{RUN_DIR}/Snakefile.snapshot")
 
 # --- Config toggle ---
-RUN_PREPROCESS = False   # flip True/False
+RUN_PREPROCESS = False   # Set to true to run preprocessing
+RUN_DISPLAY = True # Set to true to display clusters on mosaic
+
 
 # --- Rule all ---
 rule all:
@@ -35,7 +37,9 @@ rule all:
         f"{RESULTS_DIR}/latents.npy",
         f"{RESULTS_DIR}/states.npy",
         # optional preprocessing
-        *(["data/processed/craters.npy", "data/processed/metadata.csv"] if RUN_PREPROCESS else [])
+        *(["data/processed/craters.npy", "data/processed/metadata.csv"] if RUN_PREPROCESS else []),
+        # optional display
+        *(["results/crater_clusters_on_mosaic.png"]) if RUN_DISPLAY else []
 
 
 rule preprocess_craters:
@@ -53,7 +57,7 @@ rule preprocess_craters:
         lat_min=-60,
         lat_max=60,
         offset=0.5,
-        craters_to_output=50000,
+        craters_to_output=-1,   # -1 for all craters
         dst_height=100,
         dst_width=100
     shell:
@@ -85,12 +89,13 @@ rule train_autoencoder:
     params:
         epochs= 50,
         batch_size=32,
-        latent_dim=10,
+        latent_dim=40,
         lr=1e-5,
         weight_decay=1e-5,
-        lr_patience=7,
+        lr_patience=5,
         min_lr=1e-8,
-        lr_factor=0.5
+        lr_factor=0.5,
+        num_samples = 50000
     shell:
         """
         PYTHONPATH=$(pwd) python src/train/train.py \
@@ -102,6 +107,10 @@ rule train_autoencoder:
             --batch_size {params.batch_size} \
             --latent_dim {params.latent_dim} \
             --lr {params.lr} \
+            --lr_patience {params.lr_patience} \
+            --min_lr {params.min_lr} \
+            --lr_factor {params.lr_factor} \
+            --num_samples {params.num_samples} \
             --weight_decay {params.weight_decay}
         """
 
@@ -115,7 +124,7 @@ rule reconstruct_craters:
     params:
         device="cpu",
         num_images=8,
-        latent_dim=10
+        latent_dim=40
         
     shell:
         """
@@ -137,7 +146,7 @@ rule encode_latents:
         latents=f"{RESULTS_DIR}/latents.npy",
         states=f"{RESULTS_DIR}/states.npy"
     params:
-        bottleneck=10
+        bottleneck=40
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py encode \
@@ -187,6 +196,35 @@ rule plot_latent_imgs:
         """
 
 
+rule display_clusters:
+    input:
+        model=f"{MODELS_DIR}/autoencoder.pth",
+        dataset="data/processed/craters.npy",
+        metadata="data/processed/metadata.csv",
+    output:
+        df=f"{RESULTS_DIR}/crater_clusters_kmeans.csv"
+    params:
+        num_clusters=5,
+        batch_size=32,
+        device="cuda",  # or "cpu"
+        latent_dim=40
+    run:
+        if RUN_DISPLAY:
+            shell("""
+            PYTHONPATH=$(pwd) python src/display/display.py \
+                --model_path {input.model} \
+                --dataset_path {input.dataset} \
+                --metadata_path {input.metadata} \
+                --num_clusters {params.num_clusters} \
+                --batch_size {params.batch_size} \
+                --device {params.device} \
+                --latent_dim {params.latent_dim} \
+                --out_df {output.df}
+            """)
+        else:
+            print("Skipping display_clusters rule")
+
+
 rule snapshot_workflow:
     output:
         dag=f"{RUN_DIR}/dag.pdf",
@@ -198,3 +236,4 @@ rule snapshot_workflow:
         snakemake --summary > {output.summary}
         snakemake --list > {output.rules}
         """
+

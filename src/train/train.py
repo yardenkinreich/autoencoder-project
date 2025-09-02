@@ -9,17 +9,37 @@ import matplotlib.pyplot as plt
 from src.models.autoencoder import ConvAutoencoder
 
 def main(args):
+
+    # --- Reproducibility ---
+    seed = 42
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Load data
     craters = np.load(args.input)
     craters = craters.astype(np.float32)
     craters = craters.reshape(-1, 1, 100, 100) # Reshape from flattened to 1x100x100
-    dataset = TensorDataset(torch.from_numpy(craters))
+    num_samples = args.num_samples if args.num_samples is not None else len(craters)
+    num_samples = min(num_samples, len(craters))
+    rng = np.random.default_rng(seed)
+    sample_indices = rng.choice(len(craters), size=num_samples, replace=False)
+    craters_subset = craters[sample_indices]
 
-    # Train/val split
+    dataset = TensorDataset(torch.from_numpy(craters_subset))
+
+# --- Train/val split (deterministic) ---
     val_size = int(len(dataset) * args.val_split)
     train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_dataset, val_dataset = random_split(
+        dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(seed)
+    )
+
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
@@ -108,5 +128,6 @@ if __name__ == "__main__":
     parser.add_argument('--lr_patience', type=int, default=5, help="Epochs to wait before reducing LR")
     parser.add_argument('--min_lr', type=float, default=1e-8, help="Minimum learning rate")
     parser.add_argument('--lr_factor', type=float, default=0.5, help="Factor to reduce LR by")
+    parser.add_argument('--num_samples', type=int, default=None, help="Number of craters to sample for training")
     args = parser.parse_args()
     main(args)

@@ -13,6 +13,7 @@ data/test_processing/test_craters.npy
 .vscode/
 data/processed/*.npy
 code_scribbles
+logs/
 .snakefile
 .snakefile.lock
 .snakemake/

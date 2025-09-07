@@ -5,6 +5,7 @@ import pyproj
 import rasterio
 import matplotlib.pyplot as plt
 from src.helper_functions import *
+import cv2
 
 def load_and_filter_craters(craters_csv, min_diameter, max_diameter, latitude_bounds, craters_to_output):
     craters = pd.read_csv(craters_csv)
@@ -76,6 +77,65 @@ def process_and_save_crater_crops(filtered_craters, map_file, output_dir, offset
         print(craters_array.shape, craters_array.dtype)
         np.save(output_path, craters_array)
 
+def process_and_save_crater_crops_mae(
+    filtered_craters, map_file, output_dir, offset,
+    mae_input_size=224, save_crops=False, save_np_array=True, output_path=None
+):
+    """
+    Process crater crops for MAE input.
+
+    """
+    craters_list = []
+    craters_crs = get_craters_crs()
+
+    with rasterio.open(map_file) as map_ref:
+        transformer = pyproj.Transformer.from_crs(
+            craters_crs, map_ref.crs.to_string(), always_xy=True
+        )
+
+        for i, crater in filtered_craters.iterrows():
+            if i % 1000 == 0:
+                print(f"Processed {i} craters")
+            
+            # Crop crater from map
+            crater_img = crop_crater(
+                map_ref,
+                crater['LAT_CIRC_IMG'],
+                crater['LON_CIRC_IMG'],
+                crater['DIAM_CIRC_IMG'],
+                offset,
+                transformer
+            )
+            
+            # Flip crater so shadow is always on the right
+            crater_img = flip_crater(crater_img)
+
+            # Resize to MAE input size
+            crater_img = cv2.resize(crater_img, (mae_input_size, mae_input_size))
+
+            # Convert to 3 channels
+            crater_img = np.stack([crater_img]*3, axis=-1)
+
+            # Normalize
+            crater_img = crater_img.astype(np.float32) / 255.0
+
+            craters_list.append(crater_img)
+
+            # Optional: save crop as JPEG
+            if save_crops:
+                filename = os.path.join(output_dir, f"{crater['CRATER_ID']}.jpeg")
+                plt.imsave(filename, crater_img)
+
+    # Save all craters as numpy array
+    if save_np_array:
+        craters_array = np.array(craters_list)
+        print(f"Crater array shape (N, H, W, C): {craters_array.shape}, dtype: {craters_array.dtype}")
+        if output_path is not None:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            np.save(output_path, craters_array)
+            print(f"Saved MAE-ready crater array to {output_path}")
+
+
 
 def save_crater_metadata(filtered_craters, map_file, output_path):
     craters_crs = get_craters_crs()
@@ -132,6 +192,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_np_array', action='store_true')
     parser.add_argument('--dst_height', type=int, default=100)
     parser.add_argument('--dst_width', type=int, default=100)
+    parser.add_argument('--autoencoder_model', type=str, choices=['cnn', 'mae'], default='simple')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -143,18 +204,29 @@ if __name__ == '__main__':
         args.latitude_bounds,
         args.craters_to_output
     )
-
-    process_and_save_crater_crops(
-        filtered,
-        args.map_file,
-        args.output_dir,
-        args.offset,
-        args.dst_height,
-        args.dst_width,
-        args.save_crops,
-        args.save_np_array,
-        args.np_output_path
-    )
+    if args.autoencoder_model == 'cnn':
+        process_and_save_crater_crops(
+            filtered,
+            args.map_file,
+            args.output_dir,
+            args.offset,
+            args.dst_height,
+            args.dst_width,
+            args.save_crops,
+            args.save_np_array,
+            args.np_output_path
+        )
+    elif args.autoencoder_model == 'mae':   
+        process_and_save_crater_crops_mae(
+            filtered,
+            args.map_file,
+            args.output_dir,
+            args.offset,
+            mae_input_size=224,
+            save_crops=args.save_crops,
+            save_np_array=args.save_np_array,
+            output_path=args.np_output_path
+        )
 
     save_crater_metadata(
         filtered,

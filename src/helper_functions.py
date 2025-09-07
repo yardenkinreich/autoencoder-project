@@ -6,6 +6,9 @@ import pyproj
 import random
 import rasterio
 import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 
 # Data Preprocessing Functions
 
@@ -76,3 +79,25 @@ def flip_crater(img):
         img = np.fliplr(img)
 
     return img
+
+def plot_latent_space(latents, technique, clusters=None):
+
+    if latents.shape[1] > 2:
+        technique = PCA(n_components=2)
+        latents_2d = technique.fit_transform(latents)
+    else:
+        latents_2d = latents
+
+    plt.figure(figsize=(8, 6))
+    if clusters is not None:
+        scatter = plt.scatter(latents_2d[:, 0], latents_2d[:, 1], 
+                        c=clusters, cmap="tab10", alpha=0.7)
+        plt.colorbar(scatter, label="Cluster ID")
+    else:
+        plt.scatter(latents_2d[:, 0], latents_2d[:, 1], alpha=0.7)
+
+    plt.title("Latent Space Visualization")
+    plt.xlabel("Latent Dimension 1")
+    plt.ylabel("Latent Dimension 2")
+    plt.tight_layout()
+    plt.show()

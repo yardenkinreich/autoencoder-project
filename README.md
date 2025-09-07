@@ -52,8 +52,8 @@ The goal of this project is to:
     - Download the Robbins crater database: 
         [Robbins Moon Crater Database](https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins
     - Download the LRO LROC WAC Mosaic 100m: 
-        ![LRO LROC WAC Mosaic](https://planetarymaps.usgs.gov/mosaic/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif)
-    - Place the files in data/raw/.
+        [LRO LROC WAC Mosaic](https://planetarymaps.usgs.gov/mosaic/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif)
+    Place the files in data/raw/.
 
 ## Running the Pipeline (with Snakemake)
 1. Configure run name and toggles
@@ -62,11 +62,13 @@ The goal of this project is to:
 RUN_NAME = "cnn_latent20_l2_sched"
 RUN_PREPROCESS = True        # Set to False to skip preprocessing
 RUN_DISPLAY = True           # Set to False to skip display step
+TECHNIQUE = "pca"            # Choose dimensionality reduction technique: "pca" or "tsne"
+LATENT_DIM = 20              # Set latent dimension size
 ```
 - Adjust parameters in the different rules as needed: (for example, in the `train` rule)
 ```python
     params:
-        latent_dim=40,
+        latent_dim=LATENT_DIM,
         lr=1e-5,
         weight_decay=1e-5,
         lr_patience=5,
@@ -87,7 +89,23 @@ snakemake preprocess --cores all
 - Train the model only:
 ```bash
 snakemake train_autoencoder --cores all
+```
 
-4. 
+## Pipeline Features
+- Reproducible training: fixed random seed; can limit number of craters for quick experiments.
+- Configurable parameters: Easily adjust latent dimensions, learning rates, and clustering methods.
+- Clustering & visualization: PCA or other techniques to group craters; displayed as dots or images on the mosaic.
+- Toggle steps: Preprocessing, training, and display can be turned on/off independently.
+- Run snapshots: Each Snakemake run creates a snapshot of the workflow for reproducibility.
 
-
+## Output
+All files are saved under logs/ in a folder with the run name. 
+Key outputs include:
+- Models: models/autoencoder.pth
+- Loss plots: models/loss_curve.png
+- Reconstructions: models/reconstructions.png
+- Latent vectors: results/latents.npy
+- Clustering Labeled Data: results/clustering_dots.png
+- Clustering Labeled Data: results/clustering_imgs.png
+- Classify Unlabled for all Craters: results/crater_clusters_kmeans.csv
+- Classify Unlabled for all Craters: results/crater_clusters_kmeans_clusters.geojson

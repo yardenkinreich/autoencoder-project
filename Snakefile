@@ -2,8 +2,16 @@ import os
 import datetime
 import shutil
 
+
+# --- Parameters of the Run ---
+LATENT_DIM = 20
+TECHNIQUE = "tsne" # "pca" or "tsne"
+NUM_CLUSTERS = 50
+CLUSTER_METHOD = "gmm"  # "kmeans" or "gmm"
+AUTOENCODER_MODEL = "cnn"  # "cnn" or "mae"
+
 # --- Define the run name once ---
-RUN_NAME = "cnn_latent40_l2_sched_pca"
+RUN_NAME = "cnn_latent40_l2_sched_1_10"
 # Or make it dynamic with timestamp
 # RUN_NAME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -21,7 +29,7 @@ if os.path.exists("Snakefile"):
     shutil.copy("Snakefile", f"{RUN_DIR}/Snakefile.snapshot")
 
 # --- Config toggle ---
-RUN_PREPROCESS = False   # Set to true to run preprocessing
+RUN_PREPROCESS = True   # Set to true to run preprocessing
 RUN_DISPLAY = True # Set to true to display clusters on mosaic
 
 
@@ -32,14 +40,14 @@ rule all:
         f"{MODELS_DIR}/autoencoder.pth",
         f"{MODELS_DIR}/loss_curve.png",
         f"{MODELS_DIR}/reconstructions.png",
-        f"{RESULTS_DIR}/clustering_dots.png",
-        f"{RESULTS_DIR}/clustering_imgs.png",
+        f"{RESULTS_DIR}/clustering_dots_{TECHNIQUE}.png",
+        f"{RESULTS_DIR}/clustering_imgs_{TECHNIQUE}.png",
         f"{RESULTS_DIR}/latents.npy",
         f"{RESULTS_DIR}/states.npy",
         # optional preprocessing
         *(["data/processed/craters.npy", "data/processed/metadata.csv"] if RUN_PREPROCESS else []),
         # optional display
-        *(["results/crater_clusters_on_mosaic.png"]) if RUN_DISPLAY else []
+        *([f"{RESULTS_DIR}/crater_clusters_kmeans.csv"]) if RUN_DISPLAY else []
 
 
 rule preprocess_craters:
@@ -47,25 +55,25 @@ rule preprocess_craters:
         map_file="data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif",
         craters_csv="data/raw/lunar_crater_database_robbins_2018.csv"
     output:
-        crops_dir=directory("data/processed"),
-        np_output="data/processed/craters.npy",
-        metadata_output="data/processed/metadata.csv"
+        output_dir=directory(f"data/processed/{AUTOENCODER_MODEL}"),
+        np_output=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
+        metadata_output=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv"
     params:
-        output_dir="data/processed",
-        min_diameter=3.0,
+        min_diameter=1.0,
         max_diameter=10.0,
         lat_min=-60,
         lat_max=60,
         offset=0.5,
         craters_to_output=-1,   # -1 for all craters
         dst_height=100,
-        dst_width=100
+        dst_width=100,
+        autoencoder_model=AUTOENCODER_MODEL # "cnn" or "mae"
     shell:
         """
         PYTHONPATH=$(pwd) python src/data/preprocess.py \
             --map_file {input.map_file} \
             --craters_csv {input.craters_csv} \
-            --output_dir {params.output_dir} \
+            --output_dir {output.output_dir} \
             --np_output_path {output.np_output} \
             --info_output_path {output.metadata_output} \
             --min_diameter {params.min_diameter} \
@@ -76,29 +84,32 @@ rule preprocess_craters:
             --save_crops \
             --save_np_array \
             --dst_height {params.dst_height} \
-            --dst_width {params.dst_width}
+            --dst_width {params.dst_width} \
+            --autoencoder_model {params.autoencoder_model}
         """
 
 rule train_autoencoder:
     input:
-        npy="data/processed/craters.npy"
+        npy=f"data/processed/{AUTOENCODER_MODEL}/craters.npy"
     output:
         model=f"{MODELS_DIR}/autoencoder.pth",
         loss=f"{MODELS_DIR}/loss_curve.png",
         latent=f"{MODELS_DIR}/latent_vectors.npy"
     params:
-        epochs= 50,
-        batch_size=32,
-        latent_dim=40,
+        autoencoder_model=AUTOENCODER_MODEL,
+        epochs= 20,
+        batch_size=16,
+        latent_dim=LATENT_DIM,
         lr=1e-5,
         weight_decay=1e-5,
-        lr_patience=5,
+        lr_patience=4,
         min_lr=1e-8,
         lr_factor=0.5,
         num_samples = 50000
     shell:
         """
         PYTHONPATH=$(pwd) python src/train/train.py \
+            --autoencoder_model {params.autoencoder_model} \
             --input {input.npy} \
             --model_output {output.model} \
             --loss_plot {output.loss} \
@@ -117,14 +128,14 @@ rule train_autoencoder:
 
 rule reconstruct_craters:
     input:
-        npy="data/processed/craters.npy",
+        npy=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
         model=f"{MODELS_DIR}/autoencoder.pth"
     output:
         reconstructions=f"{MODELS_DIR}/reconstructions.png"
     params:
         device="cpu",
         num_images=8,
-        latent_dim=40
+        latent_dim=LATENT_DIM
         
     shell:
         """
@@ -146,7 +157,7 @@ rule encode_latents:
         latents=f"{RESULTS_DIR}/latents.npy",
         states=f"{RESULTS_DIR}/states.npy"
     params:
-        bottleneck=40
+        bottleneck=LATENT_DIM
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py encode \
@@ -162,9 +173,9 @@ rule plot_latent_dots:
         latents=f"{RESULTS_DIR}/latents.npy",
         states=f"{RESULTS_DIR}/states.npy"
     output:
-        f"{RESULTS_DIR}/clustering_dots.png"
+        f"{RESULTS_DIR}/clustering_dots_{TECHNIQUE}.png"
     params:
-        technique="pca",
+        technique=TECHNIQUE,
         model_name = "CNN"
     shell:
         """
@@ -181,9 +192,9 @@ rule plot_latent_imgs:
         latents=f"{RESULTS_DIR}/latents.npy",
         imgs_dir="data/raw/craters_for_danny"
     output:
-        f"{RESULTS_DIR}/clustering_imgs.png"
+        f"{RESULTS_DIR}/clustering_imgs_{TECHNIQUE}.png"
     params:
-        technique="pca",
+        technique=TECHNIQUE,
         model_name = "CNN"
     shell:
         """
@@ -199,15 +210,17 @@ rule plot_latent_imgs:
 rule display_clusters:
     input:
         model=f"{MODELS_DIR}/autoencoder.pth",
-        dataset="data/processed/craters.npy",
-        metadata="data/processed/metadata.csv",
+        dataset=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
+        metadata=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv",
     output:
-        df=f"{RESULTS_DIR}/crater_clusters_kmeans.csv"
+        df=f"{RESULTS_DIR}/crater_clusters_gmm_{NUM_CLUSTERS}_plot.csv"
     params:
-        num_clusters=5,
-        batch_size=32,
+        num_clusters = NUM_CLUSTERS,
+        batch_size = 32,
         device="cuda",  # or "cpu"
-        latent_dim=40
+        latent_dim = LATENT_DIM, 
+        cluster_method= CLUSTER_METHOD,  # "kmeans" or "gmm"
+        technique=TECHNIQUE,
     run:
         if RUN_DISPLAY:
             shell("""
@@ -219,8 +232,9 @@ rule display_clusters:
                 --batch_size {params.batch_size} \
                 --device {params.device} \
                 --latent_dim {params.latent_dim} \
-                --out_df {output.df}
-            """)
+                --out_df {output.df} \
+                --cluster_method {params.cluster_method} \
+                --technique {params.technique}            """)
         else:
             print("Skipping display_clusters rule")
 

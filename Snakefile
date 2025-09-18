@@ -4,14 +4,15 @@ import shutil
 
 
 # --- Parameters of the Run ---
-LATENT_DIM = 20
+LATENT_DIM = 40
 TECHNIQUE = "tsne" # "pca" or "tsne"
-NUM_CLUSTERS = 50
-CLUSTER_METHOD = "gmm"  # "kmeans" or "gmm"
-AUTOENCODER_MODEL = "cnn"  # "cnn" or "mae"
+NUM_CLUSTERS = 100
+CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
+AUTOENCODER_MODEL = "mae"  # "cnn" or "mae"
+EPOCHS = 50
 
 # --- Define the run name once ---
-RUN_NAME = "cnn_latent40_l2_sched_1_10"
+RUN_NAME = "mae_fr2_l2_1_10" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range
 # Or make it dynamic with timestamp
 # RUN_NAME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
@@ -45,9 +46,9 @@ rule all:
         f"{RESULTS_DIR}/latents.npy",
         f"{RESULTS_DIR}/states.npy",
         # optional preprocessing
-        *(["data/processed/craters.npy", "data/processed/metadata.csv"] if RUN_PREPROCESS else []),
+        *([f"data/processed/{AUTOENCODER_MODEL}/craters.npy", f"data/processed/{AUTOENCODER_MODEL}/metadata.csv"] if RUN_PREPROCESS else []),
         # optional display
-        *([f"{RESULTS_DIR}/crater_clusters_kmeans.csv"]) if RUN_DISPLAY else []
+        *([f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv"]) if RUN_DISPLAY else []
 
 
 rule preprocess_craters:
@@ -97,15 +98,18 @@ rule train_autoencoder:
         latent=f"{MODELS_DIR}/latent_vectors.npy"
     params:
         autoencoder_model=AUTOENCODER_MODEL,
-        epochs= 20,
-        batch_size=16,
+        epochs= EPOCHS,
+        batch_size=32,
         latent_dim=LATENT_DIM,
         lr=1e-5,
         weight_decay=1e-5,
         lr_patience=4,
         min_lr=1e-8,
         lr_factor=0.5,
-        num_samples = 50000
+        num_samples = 50000,
+        freeze_until=-2,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
+        masked_ratio=0.75,  # Masking ratio for MAE training        
+
     shell:
         """
         PYTHONPATH=$(pwd) python src/train/train.py \
@@ -122,7 +126,9 @@ rule train_autoencoder:
             --min_lr {params.min_lr} \
             --lr_factor {params.lr_factor} \
             --num_samples {params.num_samples} \
-            --weight_decay {params.weight_decay}
+            --weight_decay {params.weight_decay} \
+            --freeze_until {params.freeze_until} \
+            --mask_ratio {params.masked_ratio}
         """
 
 
@@ -133,6 +139,7 @@ rule reconstruct_craters:
     output:
         reconstructions=f"{MODELS_DIR}/reconstructions.png"
     params:
+        autoencoder_model=AUTOENCODER_MODEL,
         device="cpu",
         num_images=8,
         latent_dim=LATENT_DIM
@@ -140,6 +147,7 @@ rule reconstruct_craters:
     shell:
         """
         PYTHONPATH=$(pwd) python src/train/reconstruct.py \
+            --autoencoder_model {params.autoencoder_model} \
             --input {input.npy} \
             --model {input.model} \
             --device {params.device} \
@@ -213,7 +221,7 @@ rule display_clusters:
         dataset=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
         metadata=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv",
     output:
-        df=f"{RESULTS_DIR}/crater_clusters_gmm_{NUM_CLUSTERS}_plot.csv"
+        df=f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv"
     params:
         num_clusters = NUM_CLUSTERS,
         batch_size = 32,
@@ -221,6 +229,7 @@ rule display_clusters:
         latent_dim = LATENT_DIM, 
         cluster_method= CLUSTER_METHOD,  # "kmeans" or "gmm"
         technique=TECHNIQUE,
+        latent_output=f"{RESULTS_DIR}/latents_all.npy"
     run:
         if RUN_DISPLAY:
             shell("""
@@ -234,7 +243,9 @@ rule display_clusters:
                 --latent_dim {params.latent_dim} \
                 --out_df {output.df} \
                 --cluster_method {params.cluster_method} \
-                --technique {params.technique}            """)
+                --technique {params.technique}
+                --latent_output {params.latent_output}
+                """)
         else:
             print("Skipping display_clusters rule")
 

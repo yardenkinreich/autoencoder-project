@@ -8,6 +8,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 from src.models.autoencoder import ConvAutoencoder
 import timm
+from transformers import ViTMAEForPreTraining, AutoImageProcessor
+import torch.optim as optim
+
 
 def main(args):
 
@@ -123,8 +126,15 @@ def main(args):
 
     elif args.autoencoder_model == 'mae':
         # Load data
-        craters = np.load(args.input).astype(np.float32)
-        craters = craters.reshape(-1, 224, 224, 3).transpose(0, 3, 1, 2) # NHWC to NCHW
+        file_size = os.path.getsize(args.input)
+        N = file_size // (224 * 224 * 3 * 4)
+        craters = arr = np.memmap(
+            args.input,
+            dtype=np.float32,
+            mode="r",
+            shape=(N, 224, 224, 3)
+            )
+        craters = craters.transpose(0, 3, 1, 2) # NHWC to NCHW
         num_samples = args.num_samples if args.num_samples is not None else len(craters)
         num_samples = min(num_samples, len(craters))
         rng = np.random.default_rng(seed)
@@ -145,28 +155,73 @@ def main(args):
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-        model = timm.create_model(
-         "mae_vit_base_patch16_dec512d8b",
-         pretrained=True
-        )
-        # Adjust final layer for grayscale input if needed
-        model.patch_embed.proj = nn.Conv2d(1, model.patch_embed.proj.out_channels,kernel_size=16, stride=16)
-        
-        optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        # Load pretrained MAE
+        model = ViTMAEForPreTraining.from_pretrained("facebook/vit-mae-base")
+        processor = AutoImageProcessor.from_pretrained("facebook/vit-mae-base")
+
+
+        # --- Freeze encoder except last N blocks --- 
+        for param in model.parameters():
+            param.requires_grad = False
+
+        for param in model.decoder.parameters():
+            param.requires_grad = True
+
+        for param in model.vit.encoder.layer[args.freeze_until:].parameters():
+            param.requires_grad = True
+
+        optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                lr=args.lr, weight_decay=args.weight_decay)
+
+        train_losses, val_losses = [], []
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
 
         for epoch in range(args.epochs):
             model.train()
+            running_train_loss = 0.0
             for batch in train_loader:
+                # Preprocess images using the processor
                 imgs = batch[0].to(device)
+                inputs = processor(images=imgs, return_tensors="pt", use_fast=True, do_rescale=False)
+                inputs.to(device)
 
-                # timm’s MAE forward returns: loss, pred, mask
-                loss, pred, mask = model(imgs)
+                # Correct forward pass and loss extraction
+                outputs = model(**inputs, mask_ratio=args.mask_ratio)
+                loss = outputs.loss
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-            print(f"Epoch {epoch+1}/{args.epochs} | Loss: {loss.item():.4f}")
+                running_train_loss += loss.item() * imgs.size(0)
+
+            # --- validation loop ---
+            model.eval()
+            running_val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    # Preprocess images using the processor
+                    imgs = batch[0].to(device)
+                    
+                    # Use the processor to handle data preparation
+                    inputs = processor(images=imgs, return_tensors="pt")
+                    inputs.to(device)
+                    
+                    # Correct forward pass and loss extraction
+                    # The model requires keyword arguments and returns a ModelOutput object
+                    outputs = model(**inputs, mask_ratio=arhgs.mask_ratio) 
+                    val_loss = outputs.loss
+                    
+                    running_val_loss += val_loss.item() * imgs.size(0)
+
+                epoch_val_loss = running_val_loss / len(val_loader.dataset)
+                val_losses.append(epoch_val_loss)
+
+                print(f"Epoch {epoch+1}/{args.epochs} | "
+                    f"Train Loss: {epoch_train_loss:.4f} | "
+                    f"Val Loss: {epoch_val_loss:.4f}")
 
         # Save model and loss plot
         os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
@@ -174,37 +229,50 @@ def main(args):
 
         plt.figure(figsize=(8,5))
         plt.plot(train_losses, label="Train Loss")
+        plt.plot(val_losses, label="Val Loss")
+
+        # Annotate the last values
+        final_train = train_losses[-1]
+        final_val = val_losses[-1]
+        plt.text(len(train_losses)-1, final_train, f"{final_train:.4f}", 
+                color="blue", ha="right", va="bottom", fontsize=9)
+        plt.text(len(val_losses)-1, final_val, f"{final_val:.4f}", 
+                color="orange", ha="right", va="bottom", fontsize=9)
+
         plt.xlabel("Epoch")
-        plt.ylabel("MSE Loss")
-        plt.title("Training and Loss")
+        plt.ylabel("Reconstruction Loss (MSE)")
+        plt.title("Training and Validation Loss")
         plt.legend()
         plt.savefig(args.loss_plot)
         plt.close()
 
-        model.eval()
         latent_list = []
 
         with torch.no_grad():
-            for i in range(0, len(craters), batch_size):
-                batch = torch.from_numpy(craters[i:i+batch_size]).to(device)  # shape [B, C, H, W]
+            model.eval()
+            for i in range(0, len(craters), args.batch_size):
+                batch = torch.from_numpy(craters[i:i+args.batch_size]).to(device)
                 
-                # Get patch embeddings from encoder
-                patch_embeddings = model.forward_encoder(batch)  # [B, num_patches, embed_dim]
+                # Preprocess the batch
+                inputs = processor(images=batch, return_tensors="pt")
+                inputs.to(device)
+
+                # Get hidden states from the encoder by a regular forward pass
+                outputs = model.vit(**inputs, output_hidden_states=True) 
+                
+
+                patch_embeddings = outputs.last_hidden_state[:, 1:] 
                 
                 # Aggregate patch embeddings to get one vector per image
-                latent_vectors_batch = patch_embeddings.mean(dim=1)  # [B, embed_dim]
+                latent_vectors_batch = patch_embeddings.mean(dim=1)
                 
                 latent_list.append(latent_vectors_batch.cpu().numpy())
 
         # Concatenate all
         latent_vectors = np.concatenate(latent_list, axis=0)
-        np.save("latent_vectors.npy", latent_vectors)
+        np.save(args.latent_output, latent_vectors)
         print(f"Saved latent vectors of shape {latent_vectors.shape}")
         
-        
-     
-
-
 
 
 if __name__ == "__main__":
@@ -224,5 +292,7 @@ if __name__ == "__main__":
     parser.add_argument('--min_lr', type=float, default=1e-8, help="Minimum learning rate")
     parser.add_argument('--lr_factor', type=float, default=0.5, help="Factor to reduce LR by")
     parser.add_argument('--num_samples', type=int, default=None, help="Number of craters to sample for training")
+    parser.add_argument('--freeze_until', type=int, default=2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
+    parser.add_argument('--mask_ratio', type=float, default=0.75, help="Masking ratio for MAE training")
     args = parser.parse_args()
     main(args)

@@ -5,11 +5,11 @@ import shutil
 
 # --- Parameters of the Run ---
 LATENT_DIM = 40
-TECHNIQUE = "tsne" # "pca" or "tsne"
+TECHNIQUE = "pca" # "pca" or "tsne"
 NUM_CLUSTERS = 100
 CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
 AUTOENCODER_MODEL = "mae"  # "cnn" or "mae"
-EPOCHS = 50
+EPOCHS = 10
 
 # --- Define the run name once ---
 RUN_NAME = "mae_fr2_l2_1_10" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range
@@ -142,7 +142,8 @@ rule reconstruct_craters:
         autoencoder_model=AUTOENCODER_MODEL,
         device="cpu",
         num_images=8,
-        latent_dim=LATENT_DIM
+        latent_dim=LATENT_DIM,
+        freeze_until=-2  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
         
     shell:
         """
@@ -153,7 +154,8 @@ rule reconstruct_craters:
             --device {params.device} \
             --file_outq {output.reconstructions} \
             --num_images {params.num_images} \
-            --latent_dim {params.latent_dim}
+            --latent_dim {params.latent_dim} \
+            --freeze_until {params.freeze_until}
         """
 
 
@@ -224,8 +226,10 @@ rule display_clusters:
         df=f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv"
     params:
         num_clusters = NUM_CLUSTERS,
+        autoencoder_model=AUTOENCODER_MODEL,
         batch_size = 32,
         device="cuda",  # or "cpu"
+        freeze_until=-2,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
         latent_dim = LATENT_DIM, 
         cluster_method= CLUSTER_METHOD,  # "kmeans" or "gmm"
         technique=TECHNIQUE,
@@ -243,8 +247,10 @@ rule display_clusters:
                 --latent_dim {params.latent_dim} \
                 --out_df {output.df} \
                 --cluster_method {params.cluster_method} \
-                --technique {params.technique}
-                --latent_output {params.latent_output}
+                --technique {params.technique} \
+                --latent_output {params.latent_output} \
+                --autoencoder_model {params.autoencoder_model} \
+                --freeze_until {params.freeze_until}
                 """)
         else:
             print("Skipping display_clusters rule")

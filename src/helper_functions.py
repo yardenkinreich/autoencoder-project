@@ -101,3 +101,5 @@ def plot_latent_space(latents, technique, clusters=None):
     plt.ylabel("Latent Dimension 2")
     plt.tight_layout()
     plt.show()
+
+

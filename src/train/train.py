@@ -184,8 +184,8 @@ def main(args):
             for batch in train_loader:
                 # Preprocess images using the processor
                 imgs = batch[0].to(device)
-                inputs = processor(images=imgs, return_tensors="pt", use_fast=True, do_rescale=False)
-                inputs.to(device)
+                inputs = processor(images=imgs, return_tensors="pt", do_rescale=False)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
 
                 # Correct forward pass and loss extraction
                 outputs = model(**inputs, mask_ratio=args.mask_ratio)
@@ -196,6 +196,8 @@ def main(args):
                 optimizer.step()
 
                 running_train_loss += loss.item() * imgs.size(0)
+            epoch_train_loss = running_train_loss / len(train_loader.dataset)
+            train_losses.append(epoch_train_loss)
 
             # --- validation loop ---
             model.eval()
@@ -206,12 +208,12 @@ def main(args):
                     imgs = batch[0].to(device)
                     
                     # Use the processor to handle data preparation
-                    inputs = processor(images=imgs, return_tensors="pt")
-                    inputs.to(device)
+                    inputs = processor(images=imgs, return_tensors="pt", do_rescale=False)
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
                     
                     # Correct forward pass and loss extraction
                     # The model requires keyword arguments and returns a ModelOutput object
-                    outputs = model(**inputs, mask_ratio=arhgs.mask_ratio) 
+                    outputs = model(**inputs, mask_ratio=args.mask_ratio) 
                     val_loss = outputs.loss
                     
                     running_val_loss += val_loss.item() * imgs.size(0)
@@ -254,8 +256,8 @@ def main(args):
                 batch = torch.from_numpy(craters[i:i+args.batch_size]).to(device)
                 
                 # Preprocess the batch
-                inputs = processor(images=batch, return_tensors="pt")
-                inputs.to(device)
+                inputs = processor(images=batch, return_tensors="pt", do_rescale=False)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
 
                 # Get hidden states from the encoder by a regular forward pass
                 outputs = model.vit(**inputs, output_hidden_states=True) 

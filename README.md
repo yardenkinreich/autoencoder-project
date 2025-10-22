@@ -109,3 +109,13 @@ Key outputs include:
 - Clustering Labeled Data: results/clustering_imgs.png
 - Classify Unlabled for all Craters: results/crater_clusters_kmeans.csv
 - Classify Unlabled for all Craters: results/crater_clusters_kmeans_clusters.geojson
+
+
+
+
+
+Facebook MAE Pretrained Models
+base: https://huggingface.co/facebook/vit-mae-base
+large: https://huggingface.co/facebook/vit-mae-large
+huge: https://huggingface.co/facebook/vit-mae-huge
+

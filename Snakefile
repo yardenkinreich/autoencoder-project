@@ -4,19 +4,20 @@ import shutil
 
 
 # --- Parameters of the Run ---
-LATENT_DIM = 40
-TECHNIQUE = "pca" # "pca" or "tsne"
-NUM_CLUSTERS = 100
-CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
 AUTOENCODER_MODEL = "mae"  # "cnn" or "mae"
-EPOCHS = 10
+LATENT_DIM = 64
+PRETRAINED_MODEL = "facebook/vit-mae-large"
+FREEZE_UNTIL = -2  # number of encoder transformer blocks to freeze from the end (negative number)
+TECHNIQUE = "pca" # "pca" or "tsne"
+NUM_CLUSTERS = 4
+CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
+EPOCHS = 200 # number of training epochs
 
 # --- Define the run name once ---
-RUN_NAME = "mae_fr2_l2_1_10" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range
-# Or make it dynamic with timestamp
-# RUN_NAME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+#RUN_NAME = f"{AUTOENCODER_MODEL}_{}" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range, 500 for epochs
+RUN_NAME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-RUN_DIR = f"logs/{RUN_NAME}"
+RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{RUN_NAME}"
 os.makedirs(RUN_DIR, exist_ok=True)
 
 # Create subfolders inside the run directory
@@ -30,8 +31,9 @@ if os.path.exists("Snakefile"):
     shutil.copy("Snakefile", f"{RUN_DIR}/Snakefile.snapshot")
 
 # --- Config toggle ---
-RUN_PREPROCESS = True   # Set to true to run preprocessing
+RUN_PREPROCESS = True  # Set to true to run preprocessing
 RUN_DISPLAY = True # Set to true to display clusters on mosaic
+RUN_CLUSTER_JULIE = True  # Set to true to run clustering on Julie's dataset
 
 
 # --- Rule all ---
@@ -41,14 +43,18 @@ rule all:
         f"{MODELS_DIR}/autoencoder.pth",
         f"{MODELS_DIR}/loss_curve.png",
         f"{MODELS_DIR}/reconstructions.png",
-        f"{RESULTS_DIR}/clustering_dots_{TECHNIQUE}.png",
-        f"{RESULTS_DIR}/clustering_imgs_{TECHNIQUE}.png",
-        f"{RESULTS_DIR}/latents.npy",
-        f"{RESULTS_DIR}/states.npy",
         # optional preprocessing
         *([f"data/processed/{AUTOENCODER_MODEL}/craters.npy", f"data/processed/{AUTOENCODER_MODEL}/metadata.csv"] if RUN_PREPROCESS else []),
+        # optional cluster Julie's dataset
+        *([f"{RESULTS_DIR}/clustering_dots_{TECHNIQUE}.png",
+           f"{RESULTS_DIR}/clustering_imgs_{TECHNIQUE}.png"] if RUN_CLUSTER_JULIE else []),
         # optional display
-        *([f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv"]) if RUN_DISPLAY else []
+        *([f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv"]) if RUN_DISPLAY else [],
+        *([f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.png"]) if RUN_DISPLAY else [],
+        f"{RUN_DIR}/rules.txt",
+        f"{RUN_DIR}/summary.txt",
+        f"{RUN_DIR}/dag.pdf"
+
 
 
 rule preprocess_craters:
@@ -68,7 +74,9 @@ rule preprocess_craters:
         craters_to_output=-1,   # -1 for all craters
         dst_height=100,
         dst_width=100,
-        autoencoder_model=AUTOENCODER_MODEL # "cnn" or "mae"
+        autoencoder_model=AUTOENCODER_MODEL, # "cnn" or "mae"
+        batch_size = 64,
+        pretrained_model = PRETRAINED_MODEL
     shell:
         """
         PYTHONPATH=$(pwd) python src/data/preprocess.py \
@@ -86,7 +94,9 @@ rule preprocess_craters:
             --save_np_array \
             --dst_height {params.dst_height} \
             --dst_width {params.dst_width} \
-            --autoencoder_model {params.autoencoder_model}
+            --autoencoder_model {params.autoencoder_model} \
+            --batch_size {params.batch_size} \
+            --pretrained_model {params.pretrained_model}
         """
 
 rule train_autoencoder:
@@ -99,16 +109,17 @@ rule train_autoencoder:
     params:
         autoencoder_model=AUTOENCODER_MODEL,
         epochs= EPOCHS,
-        batch_size=32,
+        batch_size=400,
         latent_dim=LATENT_DIM,
-        lr=1e-5,
+        lr=1e-3,
         weight_decay=1e-5,
-        lr_patience=4,
+        lr_patience=3,
         min_lr=1e-8,
         lr_factor=0.5,
         num_samples = 50000,
-        freeze_until=-2,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
+        freeze_until= FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
         masked_ratio=0.75,  # Masking ratio for MAE training        
+        pretrained_model=PRETRAINED_MODEL
 
     shell:
         """
@@ -143,7 +154,7 @@ rule reconstruct_craters:
         device="cpu",
         num_images=8,
         latent_dim=LATENT_DIM,
-        freeze_until=-2  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
+        freeze_until = FREEZE_UNTIL  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
         
     shell:
         """
@@ -164,10 +175,13 @@ rule encode_latents:
         imgs_dir="data/raw/craters_for_danny",
         model=f"{MODELS_DIR}/autoencoder.pth"
     output:
-        latents=f"{RESULTS_DIR}/latents.npy",
-        states=f"{RESULTS_DIR}/states.npy"
+        latents=f"{RESULTS_DIR}/latents_julie.npy",
+        states=f"{RESULTS_DIR}/states_julie.npy"
     params:
-        bottleneck=LATENT_DIM
+        autoencoder_model=AUTOENCODER_MODEL,
+        bottleneck=LATENT_DIM,
+        freeze_until = FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
+        pretrained_model=PRETRAINED_MODEL
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py encode \
@@ -175,18 +189,21 @@ rule encode_latents:
             --model {input.model} \
             --bottleneck {params.bottleneck} \
             --out-latents {output.latents} \
-            --out-states {output.states}
+            --out-states {output.states} \
+            --freeze-until {params.freeze_until} \
+            --autoencoder-model {AUTOENCODER_MODEL} \
+            --pretrained-model {params.pretrained_model}
         """
 
 rule plot_latent_dots:
     input:
-        latents=f"{RESULTS_DIR}/latents.npy",
-        states=f"{RESULTS_DIR}/states.npy"
+        latents=f"{RESULTS_DIR}/latents_julie.npy",
+        states=f"{RESULTS_DIR}/states_julie.npy"
     output:
-        f"{RESULTS_DIR}/clustering_dots_{TECHNIQUE}.png"
+        f"{RESULTS_DIR}/clustering_julie_dots_{TECHNIQUE}.png"
     params:
-        technique=TECHNIQUE,
-        model_name = "CNN"
+        technique = TECHNIQUE,
+        model_name = AUTOENCODER_MODEL
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py plot-dots \
@@ -199,13 +216,13 @@ rule plot_latent_dots:
 
 rule plot_latent_imgs:
     input:
-        latents=f"{RESULTS_DIR}/latents.npy",
+        latents=f"{RESULTS_DIR}/latents_julie.npy",
         imgs_dir="data/raw/craters_for_danny"
     output:
-        f"{RESULTS_DIR}/clustering_imgs_{TECHNIQUE}.png"
+        f"{RESULTS_DIR}/clustering_julie_imgs_{TECHNIQUE}.png"
     params:
-        technique=TECHNIQUE,
-        model_name = "CNN"
+        technique = TECHNIQUE,
+        model_name = AUTOENCODER_MODEL
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py plot-imgs \
@@ -223,17 +240,19 @@ rule display_clusters:
         dataset=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
         metadata=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv",
     output:
-        df=f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv"
+        df=f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv",
+        clustering_png=f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.png"
     params:
         num_clusters = NUM_CLUSTERS,
         autoencoder_model=AUTOENCODER_MODEL,
-        batch_size = 32,
+        batch_size = 400,
         device="cuda",  # or "cpu"
-        freeze_until=-2,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
+        freeze_until = FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
         latent_dim = LATENT_DIM, 
         cluster_method= CLUSTER_METHOD,  # "kmeans" or "gmm"
-        technique=TECHNIQUE,
-        latent_output=f"{RESULTS_DIR}/latents_all.npy"
+        technique = TECHNIQUE,
+        latent_output = f"{RESULTS_DIR}/latents_all.npy"
+        pretrained_model = PRETRAINED_MODEL
     run:
         if RUN_DISPLAY:
             shell("""
@@ -250,7 +269,9 @@ rule display_clusters:
                 --technique {params.technique} \
                 --latent_output {params.latent_output} \
                 --autoencoder_model {params.autoencoder_model} \
-                --freeze_until {params.freeze_until}
+                --freeze_until {params.freeze_until}\
+                --use_gpu \
+                --pretrained_model {params.pretrained_model}
                 """)
         else:
             print("Skipping display_clusters rule")

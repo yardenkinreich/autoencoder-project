@@ -75,8 +75,8 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
         dataset = TensorDataset(torch.from_numpy(craters_subset))
         loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
 
-        model = ViTMAEForPreTraining.from_pretrained("facebook/vit-mae-base")
-        processor = AutoImageProcessor.from_pretrained("facebook/vit-mae-base")
+        model = ViTMAEForPreTraining.from_pretrained(pretrained_model)
+        processor = AutoImageProcessor.from_pretrained(pretrained_model)
 
         # Freeze encoder except last N blocks
         for param in model.parameters():
@@ -152,6 +152,7 @@ if __name__ == "__main__":
     parser.add_argument('--file_outq', default="models/reconstructions.png", help="Path to save the reconstruction image")
     parser.add_argument('--num_images', type=int, default=8, help="Number of images to reconstruct and display")
     parser.add_argument('--freeze_until', type=int, default=2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
+    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
     args = parser.parse_args()
 
 
@@ -163,5 +164,6 @@ if __name__ == "__main__":
         latent_dim=args.latent_dim,
         num_images=args.num_images,
         freeze_until=args.freeze_until,
-        autoencoder_model=args.autoencoder_model
+        autoencoder_model=args.autoencoder_model,
+        pretrained_model=args.pretrained_model
     )

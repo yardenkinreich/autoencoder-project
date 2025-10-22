@@ -6,6 +6,8 @@ import rasterio
 import matplotlib.pyplot as plt
 from src.helper_functions import *
 import cv2
+from transformers import AutoImageProcessor
+
 
 
 def load_and_filter_craters(craters_csv, min_diameter, max_diameter, latitude_bounds, craters_to_output):
@@ -58,13 +60,8 @@ def process_and_save_crater_crops(filtered_craters, map_file, output_dir, offset
                 crater['LON_CIRC_IMG'],
                 crater['DIAM_CIRC_IMG'],
                 offset,
-                transformer,
-                dst_height,
-                dst_width
+                transformer
             )
-            
-            # Flip crater so shadow is always on the right
-            crater_img = flip_crater(crater_img)
 
             craters_list.append((crater_img / 255).astype(np.float16))
 
@@ -79,56 +76,78 @@ def process_and_save_crater_crops(filtered_craters, map_file, output_dir, offset
         np.save(output_path, craters_array)
 
 def process_and_save_crater_crops_mae(
-    filtered_craters, map_file, output_dir, offset,
-    mae_input_size=224, save_crops=False, save_np_array=True, output_path=None
+    filtered_craters,
+    map_file,
+    output_dir,
+    offset,
+    save_crops=False,
+    save_np_array=True,
+    output_path=None,
+    batch_size=64,
 ):
-
     os.makedirs(output_dir, exist_ok=True)
 
     craters_crs = get_craters_crs()
     N = len(filtered_craters)
 
+    # Initialize processor once
+    processor = AutoImageProcessor.from_pretrained(args.pretrained_model)
+
+    # Prepare memmap for saving preprocessed data
+    crater_memmap = None
     if save_np_array and output_path is not None:
-        # preallocate memmap file
         crater_memmap = np.memmap(
-            output_path, dtype=np.float32, mode='w+', shape=(N, mae_input_size, mae_input_size, 3)
+            output_path, dtype=np.float32, mode="w+", shape=(N, 3, 224, 224)
         )
 
+    # Open map file
     with rasterio.open(map_file) as map_ref:
         transformer = pyproj.Transformer.from_crs(
             craters_crs, map_ref.crs.to_string(), always_xy=True
         )
 
+        batch_images = []
+        batch_indices = []
+
         for i, (_, crater) in enumerate(filtered_craters.iterrows()):
             if i % 1000 == 0:
-                print(f"Processed {i} craters")
+                print(f"Processed {i}/{N}")
 
             crater_img = crop_crater(
                 map_ref,
-                crater['LAT_CIRC_IMG'],
-                crater['LON_CIRC_IMG'],
-                crater['DIAM_CIRC_IMG'],
+                crater["LAT_CIRC_IMG"],
+                crater["LON_CIRC_IMG"],
+                crater["DIAM_CIRC_IMG"],
                 offset,
                 transformer,
-                mae_input_size,
-                mae_input_size
             )
 
-            crater_img = flip_crater(crater_img)
-            crater_img = np.stack([crater_img]*3, axis=-1).astype(np.float32) / 255.0
+            # Ensure RGB
+            if crater_img.ndim == 2:
+                crater_img = np.stack([crater_img] * 3, axis=-1)
 
-            # Save to memmap
-            if save_np_array and output_path is not None:
-                crater_memmap[i] = crater_img
+            batch_images.append(crater_img)
+            batch_indices.append(i)
 
-            if save_crops:
-                filename = os.path.join(output_dir, f"{crater['CRATER_ID']}.jpeg")
-                plt.imsave(filename, (crater_img*255).astype(np.uint8))
+            # Process and save batch
+            if len(batch_images) == batch_size or i == N - 1:
+                processed = processor(images=batch_images, return_tensors="np")
+                if crater_memmap is not None:
+                    crater_memmap[batch_indices] = processed["pixel_values"]
 
-    if save_np_array and output_path is not None:
+                # Optionally save visual crops
+                if save_crops:
+                    for img, idx in zip(batch_images, batch_indices):
+                        crater_id = filtered_craters.iloc[idx]["CRATER_ID"]
+                        filename = os.path.join(output_dir, f"{crater_id}.jpeg")
+                        plt.imsave(filename, img.astype(np.uint8))
+
+                batch_images.clear()
+                batch_indices.clear()
+
+    if crater_memmap is not None:
         crater_memmap.flush()
-        print(f"Finished processing craters. Data saved to {output_path}")
-
+        print(f"✅ Finished processing {N} craters. Data saved to {output_path}")
 
 def save_crater_metadata(filtered_craters, map_file, output_path):
     craters_crs = get_craters_crs()
@@ -186,6 +205,8 @@ if __name__ == '__main__':
     parser.add_argument('--dst_height', type=int, default=100)
     parser.add_argument('--dst_width', type=int, default=100)
     parser.add_argument('--autoencoder_model', type=str, choices=['cnn', 'mae'], default='cnn')
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -215,10 +236,10 @@ if __name__ == '__main__':
             args.map_file,
             args.output_dir,
             args.offset,
-            mae_input_size=224,
             save_crops=args.save_crops,
             save_np_array=args.save_np_array,
-            output_path=args.np_output_path
+            output_path=args.np_output_path,
+            batch_size=args.batch_size
         )
 
     save_crater_metadata(

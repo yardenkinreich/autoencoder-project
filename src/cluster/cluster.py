@@ -10,6 +10,8 @@ from PIL import Image
 from torchvision import transforms
 from src.models.autoencoder import ConvAutoencoder
 from src.helper_functions import *
+from transformers import ViTMAEForPreTraining, AutoImageProcessor
+import torch.nn.functional as F
 
 STATE_LABELS = {
     1: "New Crater",
@@ -24,36 +26,95 @@ STATE_COLORS = {
     4: "tab:red"
 }
 
-def load_images(imgs_dir):
-    transform = transforms.Compose([
-        transforms.Resize((100, 100)),
-        transforms.ToTensor()
-    ])
-    files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
-    states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
+def load_images(imgs_dir, pretrained_model):
+    if args.autoencoder_model == 'cnn':
+        transform = transforms.Compose([
+            transforms.Resize((100, 100)),
+            transforms.ToTensor()
+        ])
+        files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
+        states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
 
-    imgs = torch.stack([
-        transform(Image.fromarray(
-            flip_crater(np.array(Image.open(os.path.join(imgs_dir, f)).convert("L")))
-        ))
-        for f in files
-    ]).float()
+        imgs = torch.stack([
+            transform(Image.fromarray(
+                flip_crater(np.array(Image.open(os.path.join(imgs_dir, f)).convert("L")))
+            ))
+            for f in files
+        ]).float()
 
-    return imgs, states, files  # (N,1,H,W)
+        return imgs, states, files  # (N,1,H,W)
+
+    elif args.autoencoder_model == 'mae':
+        processor = AutoImageProcessor.from_pretrained(pretrained_model)
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor()
+        ])
+        files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
+        states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
+
+        imgs = torch.stack([
+            transform(Image.fromarray(
+                flip_crater(np.array(Image.open(os.path.join(imgs_dir, f)).convert("L")))
+            ).convert("RGB"))
+            for f in files
+        ]).float()
+
+        imgs = processor(images=list(imgs), return_tensors="pt", do_rescale=False)
+
+        return imgs, states, files  # (N,3,H,W)
 
 
-def encode_images(inputs, model_path, bottleneck, device, out_latents, out_states, states):
-    model = ConvAutoencoder(latent_dim=bottleneck)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    encoder = model.encoder.to(device).eval()
 
-    inputs = inputs.to(device)
-    with torch.no_grad():
-        latents = encoder(inputs).cpu().numpy()
 
-    np.save(out_latents, latents)
-    np.save(out_states, states)
-    print(f"Saved latents to {out_latents}, states to {out_states}")
+def encode_images(inputs, model_path, bottleneck, device, out_latents, out_states, states, freeze_until=-2):
+
+    if args.autoencoder_model == 'cnn':
+        model = ConvAutoencoder(latent_dim=bottleneck)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        encoder = model.encoder.to(device).eval()
+
+        inputs = inputs.to(device)
+        with torch.no_grad():
+            latents = encoder(inputs).cpu().numpy()
+
+        np.save(out_latents, latents)
+        np.save(out_states, states)
+        print(f"Saved latents to {out_latents}, states to {out_states}")
+    
+    elif args.autoencoder_model == 'mae':
+
+        model = ViTMAEForPreTraining.from_pretrained(pretrained_model)
+
+        # Freeze encoder except last N blocks
+        for param in model.parameters():
+            param.requires_grad = False
+        for param in model.decoder.parameters():
+            param.requires_grad = True
+        for param in model.vit.encoder.layer[freeze_until:].parameters():
+            param.requires_grad = True
+
+        try:
+            state_dict = torch.load(model_path, map_location=device)
+            model.load_state_dict(state_dict)
+            print(f"Successfully loaded MAE model weights from {model_path}")
+        except Exception as e:
+            print(f"Error loading state_dict for MAE model: {e}")
+            return
+        
+        model.eval()
+
+        with torch.no_grad():
+            inputs = {k: v for k, v in inputs.items()}
+
+            # Get hidden states from the encoder by a regular forward pass
+            outputs = model.vit(**inputs, output_hidden_states=True) 
+            latents = outputs.hidden_states[-1][:, 0, :]
+
+
+        np.save(out_latents, latents)
+        np.save(out_states, states)
+        print(f"Saved latents to {out_latents}, states to {out_states}")
 
 
 def plot_dots(latents_path, states_path, out_png, technique, model_name):
@@ -117,9 +178,12 @@ if __name__ == "__main__":
     enc = subparsers.add_parser("encode")
     enc.add_argument("--imgs-dir", required=True)
     enc.add_argument("--model", required=True)
+    enc.add_argument("--autoencoder-model", choices=["cnn", "mae"], default="cnn", required=True)
     enc.add_argument("--bottleneck", type=int, default=6)
     enc.add_argument("--out-latents", required=True)
     enc.add_argument("--out-states", required=True)
+    enc.add_argument("--freeze-until", type=int, default=-2)
+    enc.add_argument("--pretrained-model", type=str, default='facebook/vit-mae-large')
 
     # plot dots
     dots = subparsers.add_parser("plot-dots")
@@ -141,9 +205,9 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.command == "encode":
-        inputs, states, _ = load_images(args.imgs_dir)
+        inputs, states, _ = load_images(args.imgs_dir, args.pretrained_model)
         encode_images(inputs, args.model, args.bottleneck, device,
-                      args.out_latents, args.out_states, states)
+                      args.out_latents, args.out_states, states, args.freeze_until, args.pretrained_model)
     elif args.command == "plot-dots":
         plot_dots(args.latents, args.states, args.out_png, args.technique, args.model_name)
     elif args.command == "plot-imgs":

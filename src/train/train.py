@@ -22,6 +22,7 @@ def main(args):
     torch.backends.cudnn.benchmark = False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     if args.autoencoder_model == 'cnn':
         # Load data
@@ -59,8 +60,8 @@ def main(args):
         scheduler = ReduceLROnPlateau(
             optimizer,
             mode="min",        # "min" for val_loss
-            factor= args.lr_factor,        # reduce LR by half
-            patience = args.lr_patience,     # wait 5 epochs before reducing
+            factor= args.lr_factor,        # reduce LR by 
+            patience = args.lr_patience,     # wait epochs before reducing
             min_lr = args.min_lr     # minimum learning rate
             )
 
@@ -156,8 +157,8 @@ def main(args):
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
         # Load pretrained MAE
-        model = ViTMAEForPreTraining.from_pretrained("facebook/vit-mae-base")
-        processor = AutoImageProcessor.from_pretrained("facebook/vit-mae-base")
+        model = ViTMAEForPreTraining.from_pretrained(args.pretrained_model)
+        processor = AutoImageProcessor.from_pretrained(args.pretrained_model)
 
 
         # --- Freeze encoder except last N blocks --- 
@@ -173,9 +174,18 @@ def main(args):
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                 lr=args.lr, weight_decay=args.weight_decay)
 
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode="min",        # "min" for val_loss
+            factor= args.lr_factor,        # reduce LR by half
+            patience = args.lr_patience,     # wait epochs before reducing
+            min_lr = args.min_lr     # minimum learning rate
+            )
+
         train_losses, val_losses = [], []
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
         model.to(device)
 
         for epoch in range(args.epochs):
@@ -184,7 +194,7 @@ def main(args):
             for batch in train_loader:
                 # Preprocess images using the processor
                 imgs = batch[0].to(device)
-                inputs = processor(images=imgs, return_tensors="pt", do_rescale=False)
+                inputs = processor(images=imgs, return_tensors="pt")
                 inputs = {k: v.to(device) for k, v in inputs.items()}
 
                 # Correct forward pass and loss extraction
@@ -220,10 +230,13 @@ def main(args):
 
                 epoch_val_loss = running_val_loss / len(val_loader.dataset)
                 val_losses.append(epoch_val_loss)
-
-                print(f"Epoch {epoch+1}/{args.epochs} | "
+            
+            scheduler.step(epoch_val_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch+1}/{args.epochs} | "
                     f"Train Loss: {epoch_train_loss:.4f} | "
-                    f"Val Loss: {epoch_val_loss:.4f}")
+                    f"Val Loss: {epoch_val_loss:.4f} | "
+                    f"LR: {current_lr:.2e}")
 
         # Save model and loss plot
         os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
@@ -262,12 +275,9 @@ def main(args):
                 # Get hidden states from the encoder by a regular forward pass
                 outputs = model.vit(**inputs, output_hidden_states=True) 
                 
+                # Get CLS token
+                latent_vectors_batch = outputs.hidden_states[-1][:, 0, :]
 
-                patch_embeddings = outputs.last_hidden_state[:, 1:] 
-                
-                # Aggregate patch embeddings to get one vector per image
-                latent_vectors_batch = patch_embeddings.mean(dim=1)
-                
                 latent_list.append(latent_vectors_batch.cpu().numpy())
 
         # Concatenate all
@@ -296,5 +306,6 @@ if __name__ == "__main__":
     parser.add_argument('--num_samples', type=int, default=None, help="Number of craters to sample for training")
     parser.add_argument('--freeze_until', type=int, default=2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
     parser.add_argument('--mask_ratio', type=float, default=0.75, help="Masking ratio for MAE training")
+    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
     args = parser.parse_args()
     main(args)

@@ -67,7 +67,8 @@ def load_images(imgs_dir, pretrained_model):
 
 
 
-def encode_images(inputs, model_path, bottleneck, device, out_latents, out_states, states, freeze_until=-2):
+def encode_images(inputs, model_path, bottleneck, device, out_latents, 
+out_states, states, freeze_until=-2,autoencoder_model="mae", pretrained_model='facebook/vit-mae-large'):
 
     if args.autoencoder_model == 'cnn':
         model = ConvAutoencoder(latent_dim=bottleneck)
@@ -207,7 +208,7 @@ if __name__ == "__main__":
     if args.command == "encode":
         inputs, states, _ = load_images(args.imgs_dir, args.pretrained_model)
         encode_images(inputs, args.model, args.bottleneck, device,
-                      args.out_latents, args.out_states, states, args.freeze_until, args.pretrained_model)
+                      args.out_latents, args.out_states, states, args.freeze_until, args.autoencoder_model, args.pretrained_model)
     elif args.command == "plot-dots":
         plot_dots(args.latents, args.states, args.out_png, args.technique, args.model_name)
     elif args.command == "plot-imgs":

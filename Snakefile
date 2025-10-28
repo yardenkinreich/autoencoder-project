@@ -11,13 +11,13 @@ FREEZE_UNTIL = -2  # number of encoder transformer blocks to freeze from the end
 TECHNIQUE = "pca" # "pca" or "tsne"
 NUM_CLUSTERS = 4
 CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
-EPOCHS = 200 # number of training epochs
+EPOCHS = 50 # number of training epochs
 
 # --- Define the run name once ---
 #RUN_NAME = f"{AUTOENCODER_MODEL}_{}" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range, 500 for epochs
-RUN_NAME = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+RUN_NAME = "-2_100_42025-10-26"
 
-RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{RUN_NAME}"
+RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{PRETRAINED_MODEL}/{RUN_NAME}"
 os.makedirs(RUN_DIR, exist_ok=True)
 
 # Create subfolders inside the run directory
@@ -50,7 +50,6 @@ rule all:
            f"{RESULTS_DIR}/clustering_imgs_{TECHNIQUE}.png"] if RUN_CLUSTER_JULIE else []),
         # optional display
         *([f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv"]) if RUN_DISPLAY else [],
-        *([f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.png"]) if RUN_DISPLAY else [],
         f"{RUN_DIR}/rules.txt",
         f"{RUN_DIR}/summary.txt",
         f"{RUN_DIR}/dag.pdf"
@@ -112,9 +111,9 @@ rule train_autoencoder:
         batch_size=400,
         latent_dim=LATENT_DIM,
         lr=1e-3,
-        weight_decay=1e-5,
+        weight_decay=0.05,
         lr_patience=3,
-        min_lr=1e-8,
+        min_lr=1e-6,
         lr_factor=0.5,
         num_samples = 50000,
         freeze_until= FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
@@ -251,7 +250,7 @@ rule display_clusters:
         latent_dim = LATENT_DIM, 
         cluster_method= CLUSTER_METHOD,  # "kmeans" or "gmm"
         technique = TECHNIQUE,
-        latent_output = f"{RESULTS_DIR}/latents_all.npy"
+        latent_output = f"{MODELS_DIR}/latent_vectors.npy",
         pretrained_model = PRETRAINED_MODEL
     run:
         if RUN_DISPLAY:

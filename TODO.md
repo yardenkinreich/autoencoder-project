@@ -9,4 +9,9 @@ To do list of additions/changes in code
 
 
 now:
-* fix preprocess of mae data
+* fix preprocess of mae data - finished
+
+* she did tsne then kmeans
+* umap instaed of tsne? go back to what you write about it
+* change run name rule in snakemake - ok think i fixed this
+

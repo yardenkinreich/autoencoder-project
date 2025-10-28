@@ -4,11 +4,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import torch.nn as nn
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, CosineAnnealingWarmRestarts
 import matplotlib.pyplot as plt
 from src.models.autoencoder import ConvAutoencoder
 import timm
-from transformers import ViTMAEForPreTraining, AutoImageProcessor
+from transformers import ViTMAEForPreTraining
 import torch.optim as optim
 
 
@@ -57,13 +57,7 @@ def main(args):
         # Training loop
         train_losses = []
         val_losses = []
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode="min",        # "min" for val_loss
-            factor= args.lr_factor,        # reduce LR by 
-            patience = args.lr_patience,     # wait epochs before reducing
-            min_lr = args.min_lr     # minimum learning rate
-            )
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
 
         for epoch in range(args.epochs):
             model.train()
@@ -90,8 +84,8 @@ def main(args):
             epoch_val_loss = running_val_loss / val_size
             val_losses.append(epoch_val_loss)
 
-            scheduler.step(epoch_val_loss)
-            current_lr = optimizer.param_groups[0]['lr']
+            scheduler.step()
+            current_lr = optimizer.get_lr()
 
             print(f"Epoch [{epoch+1}/{args.epochs}] - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}", 
                 f"LR: {current_lr:.2e}")
@@ -133,9 +127,8 @@ def main(args):
             args.input,
             dtype=np.float32,
             mode="r",
-            shape=(N, 224, 224, 3)
+            shape=(N, 3, 224, 224)
             )
-        craters = craters.transpose(0, 3, 1, 2) # NHWC to NCHW
         num_samples = args.num_samples if args.num_samples is not None else len(craters)
         num_samples = min(num_samples, len(craters))
         rng = np.random.default_rng(seed)
@@ -158,8 +151,6 @@ def main(args):
 
         # Load pretrained MAE
         model = ViTMAEForPreTraining.from_pretrained(args.pretrained_model)
-        processor = AutoImageProcessor.from_pretrained(args.pretrained_model)
-
 
         # --- Freeze encoder except last N blocks --- 
         for param in model.parameters():
@@ -174,12 +165,10 @@ def main(args):
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                 lr=args.lr, weight_decay=args.weight_decay)
 
-        scheduler = ReduceLROnPlateau(
+        scheduler = CosineAnnealingLR(
             optimizer,
-            mode="min",        # "min" for val_loss
-            factor= args.lr_factor,        # reduce LR by half
-            patience = args.lr_patience,     # wait epochs before reducing
-            min_lr = args.min_lr     # minimum learning rate
+            T_max = args.epochs,   # total number of epochs
+            eta_min = args.min_lr       # final LR
             )
 
         train_losses, val_losses = [], []
@@ -192,10 +181,8 @@ def main(args):
             model.train()
             running_train_loss = 0.0
             for batch in train_loader:
-                # Preprocess images using the processor
                 imgs = batch[0].to(device)
-                inputs = processor(images=imgs, return_tensors="pt")
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                inputs = {"pixel_values": imgs}
 
                 # Correct forward pass and loss extraction
                 outputs = model(**inputs, mask_ratio=args.mask_ratio)
@@ -214,14 +201,9 @@ def main(args):
             running_val_loss = 0.0
             with torch.no_grad():
                 for batch in val_loader:
-                    # Preprocess images using the processor
                     imgs = batch[0].to(device)
+                    inputs = {"pixel_values": imgs}
                     
-                    # Use the processor to handle data preparation
-                    inputs = processor(images=imgs, return_tensors="pt", do_rescale=False)
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-                    
-                    # Correct forward pass and loss extraction
                     # The model requires keyword arguments and returns a ModelOutput object
                     outputs = model(**inputs, mask_ratio=args.mask_ratio) 
                     val_loss = outputs.loss
@@ -231,8 +213,8 @@ def main(args):
                 epoch_val_loss = running_val_loss / len(val_loader.dataset)
                 val_losses.append(epoch_val_loss)
             
-            scheduler.step(epoch_val_loss)
-            current_lr = optimizer.param_groups[0]['lr']
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]
             print(f"Epoch {epoch+1}/{args.epochs} | "
                     f"Train Loss: {epoch_train_loss:.4f} | "
                     f"Val Loss: {epoch_val_loss:.4f} | "
@@ -266,11 +248,8 @@ def main(args):
         with torch.no_grad():
             model.eval()
             for i in range(0, len(craters), args.batch_size):
-                batch = torch.from_numpy(craters[i:i+args.batch_size]).to(device)
-                
-                # Preprocess the batch
-                inputs = processor(images=batch, return_tensors="pt", do_rescale=False)
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+                batch = torch.tensor(craters[i:i+args.batch_size], device=device)
+                inputs = {"pixel_values": batch}
 
                 # Get hidden states from the encoder by a regular forward pass
                 outputs = model.vit(**inputs, output_hidden_states=True) 

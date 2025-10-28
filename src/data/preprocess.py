@@ -84,6 +84,7 @@ def process_and_save_crater_crops_mae(
     save_np_array=True,
     output_path=None,
     batch_size=64,
+    autoencoder_model="mae"
 ):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -120,6 +121,7 @@ def process_and_save_crater_crops_mae(
                 crater["DIAM_CIRC_IMG"],
                 offset,
                 transformer,
+                autoencoder_model
             )
 
             # Ensure RGB
@@ -239,7 +241,8 @@ if __name__ == '__main__':
             save_crops=args.save_crops,
             save_np_array=args.save_np_array,
             output_path=args.np_output_path,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            autoencoder_model=args.autoencoder_model
         )
 
     save_crater_metadata(

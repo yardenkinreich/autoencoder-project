@@ -5,12 +5,12 @@ import numpy as np
 from src.train.train import ConvAutoencoder  
 import argparse
 import os
-from transformers import ViTMAEForPreTraining, AutoImageProcessor
+from transformers import ViTMAEForPreTraining
 import torch.nn.functional as F
 
 
 def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
-                         device="cpu",latent_dim=6 ,filename="models/reconstructions.png", num_images=8, freeze_until=-2):
+                         device="cpu",latent_dim=6 ,filename="models/reconstructions.png", num_images=8, freeze_until=-2, pretrained_model='facebook/vit-mae-large'):
     seed = 42
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -65,9 +65,9 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
             npy_path,
             dtype=np.float32,
             mode="r",
-            shape=(N, 224, 224, 3)
+            shape=(N, 3, 224, 224)
         )
-        craters = craters.transpose(0, 3, 1, 2)  # NHWC -> NCHW
+
         rng = np.random.default_rng(seed)
         sample_indices = rng.choice(len(craters), size=num_images, replace=False)
         craters_subset = craters[sample_indices]
@@ -76,7 +76,6 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
         loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
 
         model = ViTMAEForPreTraining.from_pretrained(pretrained_model)
-        processor = AutoImageProcessor.from_pretrained(pretrained_model)
 
         # Freeze encoder except last N blocks
         for param in model.parameters():
@@ -114,32 +113,57 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
         recon = recon.permute(0, 5, 1, 3, 2, 4)   # [B, 3, h, ps, w, ps]
         recon = recon.reshape(-1, 3, 224, 224)    # [B, 3, H, W]
 
+        imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+        imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+
+        recon = recon * imagenet_std + imagenet_mean
+        inputs = inputs * imagenet_std + imagenet_mean
+
+        # Clamp for plotting
+        recon = recon.clamp(0, 1)
+        inputs = inputs.clamp(0, 1)
+
+
         # ---- PLOT ----
-        fig, axes = plt.subplots(3, num_images, figsize=(num_images*2, 6))
-        fig.suptitle(f"Original, Masked Input, and Reconstruction ({autoencoder_model.upper()})", fontsize=14)
+        fig, axes = plt.subplots(4, num_images, figsize=(num_images*2, 8))
+        fig.suptitle("Original, Reconstruction, Mask Overlay, and Composite", fontsize=14)
 
         for i in range(num_images):
-            orig_img = inputs[i].cpu().permute(1, 2, 0).numpy()  # HWC
-            recon_img = recon[i].cpu().permute(1, 2, 0).clamp(0,1).numpy()
+            orig_img = inputs[i].cpu().permute(1, 2, 0).numpy()
+            recon_img = recon[i].cpu().permute(1, 2, 0).clamp(0, 1).numpy()
 
-            # Build visible mask (True = visible)
+            # mask[i, j] == True → patch was hidden
             mask_bool = mask[i].bool().cpu().numpy().reshape(h, w)
-            mask_img = np.kron(mask_bool, np.ones((patch_size, patch_size))).astype(bool)  # upscale to image size
+            mask_img = np.kron(mask_bool, np.ones((patch_size, patch_size))).astype(bool)
 
-            # Plot originals, overlay missing patches in red, reconstruction
+            # Row 0: Original
             axes[0, i].imshow(orig_img)
+            axes[0, i].set_title("Original", fontsize=9)
             axes[0, i].axis("off")
 
-            axes[1, i].imshow(orig_img)                      # original as background
-            axes[1, i].imshow(~mask_img, cmap="Reds", alpha=0.3)  # overlay red where masked
+            # Row 1: Reconstruction
+            axes[1, i].imshow(recon_img)
+            axes[1, i].set_title("Reconstruction", fontsize=9)
             axes[1, i].axis("off")
 
-            axes[2, i].imshow(recon_img)
+            # Row 2: Mask overlay (red = hidden)
+            axes[2, i].imshow(orig_img)
+            axes[2, i].imshow(~mask_img, cmap="Reds", alpha=0.3)
+            axes[2, i].set_title("Masked Patches", fontsize=9)
             axes[2, i].axis("off")
 
-        plt.tight_layout()
+            # Row 3: Composite (orig for visible, recon for hidden)
+            mask_img_rgb = np.expand_dims(mask_img, axis=-1)  # (H, W, 1)
+            composite_img = np.where(mask_img_rgb, recon_img, orig_img)
+
+            axes[3, i].imshow(composite_img)
+            axes[3, i].set_title("Composite", fontsize=9)
+            axes[3, i].axis("off")
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.savefig(filename)
         plt.close()
+
 
     
 if __name__ == "__main__":

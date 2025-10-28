@@ -28,7 +28,7 @@ import os
 
 # Data Preprocessing Functions
 
-def crop_crater(map_ref, lat, lon, diameter, offset, transformer):
+def crop_crater(map_ref, lat, lon, diameter, offset, transformer, autoencoder_model):
 
     if lon > 180:
         lon -= 360
@@ -56,6 +56,9 @@ def crop_crater(map_ref, lat, lon, diameter, offset, transformer):
         cropped_image_projected = cropped_image
 
     flipped_image = flip_crater(cropped_image_projected)
+
+    if autoencoder_model == "mae":
+        flipped_image = cv2.resize(flipped_image, (224, 224), interpolation=cv2.INTER_CUBIC)
 
     return flipped_image
 

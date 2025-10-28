@@ -15,7 +15,7 @@ import argparse
 from src.train.train import ConvAutoencoder
 from src.helper_functions import cluster_and_plot
 import os
-from transformers import ViTMAEForPreTraining, AutoImageProcessor
+from transformers import ViTMAEForPreTraining
 
 
 def main(args):# --- Arguments ---
@@ -46,66 +46,69 @@ def main(args):# --- Arguments ---
         latents = np.concatenate(latents, axis=0)
 
     elif args.autoencoder_model == "mae":
-        # Load data
-        file_size = os.path.getsize(args.dataset_path)
-        N = file_size // (224 * 224 * 3 * 4)
-        craters = arr = np.memmap(
-            args.dataset_path,
-            dtype=np.float32,
-            mode="r",
-            shape=(N, 224, 224, 3)
-            )
-        craters = craters.transpose(0, 3, 1, 2) # NHWC to NCHW
+        if not os.path.exists(args.latent_output):
+            # Load data
+            file_size = os.path.getsize(args.dataset_path)
+            N = file_size // (224 * 224 * 3 * 4)
+            craters = arr = np.memmap(
+                args.dataset_path,
+                dtype=np.float32,
+                mode="r",
+                shape=(N, 224, 224, 3)
+                )
+            craters = craters.transpose(0, 3, 1, 2) # NHWC to NCHW
 
-        dataset = TensorDataset(torch.from_numpy(craters))
-        loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+            dataset = TensorDataset(torch.from_numpy(craters))
+            loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
-        model = ViTMAEForPreTraining.from_pretrained(args.pretrained_model)
-        processor = AutoImageProcessor.from_pretrained(args.pretrained_model)
-        # --- Freeze encoder except last N blocks --- 
-        for param in model.parameters():
-            param.requires_grad = False
+            model = ViTMAEForPreTraining.from_pretrained(args.pretrained_model)
+            # --- Freeze encoder except last N blocks --- 
+            for param in model.parameters():
+                param.requires_grad = False
 
-        for param in model.decoder.parameters():
-            param.requires_grad = True
+            for param in model.decoder.parameters():
+                param.requires_grad = True
 
-        for param in model.vit.encoder.layer[args.freeze_until:].parameters():
-            param.requires_grad = True
+            for param in model.vit.encoder.layer[args.freeze_until:].parameters():
+                param.requires_grad = True
 
-        try:
-            state_dict = torch.load(args.model_path, map_location=device)
-            model.load_state_dict(state_dict)
-            print(f"Successfully loaded MAE model weights from {args.model_path}")
-        except Exception as e:
-            print(f"Error loading state_dict for MAE model: {e}")
-            return # Exit function on load failure
+            try:
+                state_dict = torch.load(args.model_path, map_location=device)
+                model.load_state_dict(state_dict)
+                print(f"Successfully loaded MAE model weights from {args.model_path}")
+            except Exception as e:
+                print(f"Error loading state_dict for MAE model: {e}")
+                return # Exit function on load failure
 
-        model.to(device)
-        model.eval()
+            model.to(device)
+            model.eval()
 
-        latent_list = []
+            latent_list = []
 
-        with torch.no_grad():
-            for batch in loader:
-                batch = batch[0].to(device)
-                
-                # Preprocess the batch
-                images = batch.permute(0, 2, 3, 1).cpu().numpy()  # (B,H,W,3)
-                inputs = processor(images=list(images), return_tensors="pt", do_rescale=False)
-                inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                for batch in loader:
+                    batch = batch[0].to(device)
+                    
+                    # Preprocess the batch
+                    images = batch.permute(0, 2, 3, 1).numpy()  # (B,H,W,3)
+                    inputs = {"pixel_values": imgs}
 
-                # Get hidden states from the encoder by a regular forward pass
-                outputs = model.vit(**inputs, output_hidden_states=True) 
-                
-                # Get CLS token
-                latent_vectors_batch = outputs.hidden_states[-1][:, 0, :]  # (B, hidden_size)
-                
-                latent_list.append(latent_vectors_batch.cpu().numpy())
+                    # Get hidden states from the encoder by a regular forward pass
+                    outputs = model.vit(**inputs, output_hidden_states=True) 
+                    
+                    # Get CLS token
+                    latent_vectors_batch = outputs.hidden_states[-1][:, 0, :]  # (B, hidden_size)
+                    
+                    latent_list.append(latent_vectors_batch.cpu().numpy())
 
-        # Concatenate all
-        latents = np.concatenate(latent_list, axis=0)
-        np.save(args.latent_output, latents)
-        print(f"Saved latent vectors of shape {latents.shape}")
+            # Concatenate all
+            latents = np.concatenate(latent_list, axis=0)
+            np.save(args.latent_output, latents)
+            print(f"Saved latent vectors of shape {latents.shape}")
+
+        else:
+            latents = np.load(args.latent_output)
+            print(f"Loaded latent vectors from {args.latent_output} with shape {latents.shape}")
 
 
     # --- Load metadata ---

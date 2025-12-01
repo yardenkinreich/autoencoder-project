@@ -98,6 +98,13 @@ snakemake train_autoencoder --cores all
 - Toggle steps: Preprocessing, training, and display can be turned on/off independently.
 - Run snapshots: Each Snakemake run creates a snapshot of the workflow for reproducibility.
 
+## MAE Model
+facebook/vit-mae structure
+Blocks 0-7   (Early):   Edges, textures, basic patterns → KEEP FROZEN
+Blocks 8-15  (Middle):  Part-level features, shapes → MAYBE UNFREEZE
+Blocks 16-23 (Late):    Domain-specific, high-level → DEFINITELY UNFREEZE
+Decoder:                Task-specific reconstruction → ALWAYS UNFREEZE
+
 ## Output
 All files are saved under logs/ in a folder with the run name. 
 Key outputs include:
@@ -109,6 +116,30 @@ Key outputs include:
 - Clustering Labeled Data: results/clustering_imgs.png
 - Classify Unlabled for all Craters: results/crater_clusters_kmeans.csv
 - Classify Unlabled for all Craters: results/crater_clusters_kmeans_clusters.geojson
+
+
+5. Very small raw sizes (53×53, 83×84) → heavy upsampling
+
+This is something to pay attention to.
+
+A crater that is 53×53 becomes 224×224:
+
+You are upsampling by 4×
+
+Interpolation smooths details
+
+Model sees blurry inputs
+
+This usually causes:
+
+Worse reconstructions
+
+Lower MAE patch accuracy
+
+Blurry outputs
+
+Not a pipeline error — just the nature of your data.
+
 
 
 

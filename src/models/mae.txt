@@ -1,0 +1,65 @@
+import torch
+import torch.nn as nn
+from transformers import ViTMAEForPreTraining
+from src.helper_functions import *
+
+class MAEWithBottleneck(nn.Module):
+    def __init__(self, mae_model, latent_dim=32, unfreeze_encoder=True, unfreeze_decoder=False, freeze_until=-2):
+        super().__init__()
+        self.mae = mae_model
+        self.latent_dim = latent_dim
+
+        # --- Freeze logic ---
+        for param in self.mae.parameters():
+            param.requires_grad = False
+
+        if unfreeze_encoder:
+            for param in self.mae.vit.encoder.layer[freeze_until:].parameters():
+                param.requires_grad = True
+
+        if unfreeze_decoder:
+            for param in self.mae.decoder.parameters():
+                param.requires_grad = True
+
+        # --- Bottleneck ---
+        self.bottleneck = nn.Sequential(
+            nn.Linear(self.mae.config.hidden_size, self.mae.config.hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(self.mae.config.hidden_size // 2, latent_dim)
+        )
+
+        # --- Unbottleneck back to decoder input ---
+        self.unbottleneck = nn.Linear(latent_dim, self.mae.config.hidden_size)
+
+    def forward(self, pixel_values, mask_ratio=0.75, output_hidden_states=False):
+        # === ENCODER ===
+        vit_outputs = self.mae.vit(pixel_values=pixel_values, mask_ratio=mask_ratio, output_hidden_states=True)
+        last_hidden = vit_outputs.last_hidden_state  # [B, N_patches+1, hidden_size]
+
+        # Use CLS token as representation (could also try mean pooling)
+        cls_token = last_hidden[:, 0, :]  # [B, hidden_size]
+        z = self.bottleneck(cls_token)    # [B, latent_dim]
+        expanded_z = self.unbottleneck(z) # [B, hidden_size]
+
+        # === REPLACE CLS TOKEN FOR DECODER ===
+        # Replace the CLS token in the encoder output with the bottlenecked version
+        last_hidden = last_hidden.clone()
+        last_hidden[:, 0, :] = expanded_z
+
+        # === DECODER ===
+        decoder_outputs = self.mae.decoder(
+            last_hidden,
+            vit_outputs.ids_restore
+        )
+
+        logits = decoder_outputs.logits
+        loss = self.mae.forward_loss(pixel_values, logits, vit_outputs.mask)
+        # --- Add VICReg + smooth entropy regularizers ---
+        reg_vicreg = vicreg_regularizer(z, gamma_var=1.0, gamma_cov=1.0)
+        reg_smooth = smooth_entropy_regularizer(z, temperature=0.1, gamma_ent=0.05)
+
+        # Combine losses (tune weights)
+        total_loss = 0.1 * loss + 1 * reg_vicreg + 0.05 * reg_smooth
+
+        return z, logits, total_loss
+

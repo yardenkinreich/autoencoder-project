@@ -7,10 +7,14 @@ import argparse
 import os
 from transformers import ViTMAEForPreTraining
 import torch.nn.functional as F
+from src.helper_functions import *
+import sys
+sys.path.append(os.path.abspath("src/models/mae"))
+from src.models.mae.models_mae import *
 
 
 def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
-                         device="cpu",latent_dim=6 ,filename="models/reconstructions.png", num_images=8, freeze_until=-2, pretrained_model='facebook/vit-mae-large'):
+                         device="cpu",latent_dim=6 , filename="models/reconstructions.png", num_images=8, freeze_until=-2, pretrained_model='facebook/vit-mae-large', mask_ratio=0.75):
     seed = 42
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -40,7 +44,7 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
         # Take a batch
         inputs = next(iter(loader))[0].to(device)
         with torch.no_grad():
-            outputs = model(inputs)
+            outputs = model(inputs, mask_ratio)
 
         # Plot originals and reconstructions
         fig, axes = plt.subplots(2, num_images, figsize=(num_images*2, 4))
@@ -75,23 +79,30 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
         dataset = TensorDataset(torch.from_numpy(craters_subset))
         loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
 
-        model = ViTMAEForPreTraining.from_pretrained(pretrained_model)
-
-        # Freeze encoder except last N blocks
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in model.decoder.parameters():
-            param.requires_grad = True
-        for param in model.vit.encoder.layer[freeze_until:].parameters():
-            param.requires_grad = True
+        # Load pretrained MAE
+        model = mae_vit_large_patch16()
 
         try:
-            state_dict = torch.load(model_path, map_location=device)
-            model.load_state_dict(state_dict)
+            state_dict = torch.load(model_path, map_location="cpu")
+            msg = model.load_state_dict(state_dict)
             print(f"Successfully loaded MAE model weights from {model_path}")
+            print(f"Loaded pretrained MAE weights: {msg}")
+
         except Exception as e:
             print(f"Error loading state_dict for MAE model: {e}")
             return
+
+        for name, param in model.named_parameters():
+            param.requires_grad = False  # freeze everything
+
+        # Unfreeze only the last few encoder layers
+        for blk in model.blocks[freeze_until:]:
+            for param in blk.parameters():
+                param.requires_grad = True
+
+        # Optionally unfreeze the decoder (if you want to fine-tune reconstruction)
+        for param in model.decoder_blocks.parameters():
+            param.requires_grad = True
 
         model.to(device)
         model.eval()
@@ -101,69 +112,70 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
 
 
         with torch.no_grad():
-            outputs = model(inputs, mask_ratio=0.75)
-            logits = outputs.logits   # [B, num_patches, patch_dim]
-            mask = outputs.mask       # [B, num_patches] boolean tensor
+            loss, pred, mask = model(inputs, mask_ratio)
 
-        patch_size = model.config.patch_size  # usually 16
-        h = w = 224 // patch_size             # number of patches per dim
+        print("pred shape:", pred.shape)
+        print("mask shape:", mask.shape)
+        print("patch size:", model.patch_embed.patch_size)
 
         # reconstruct images from patch logits
-        recon = logits.reshape(-1, h, w, patch_size, patch_size, 3)
-        recon = recon.permute(0, 5, 1, 3, 2, 4)   # [B, 3, h, ps, w, ps]
-        recon = recon.reshape(-1, 3, 224, 224)    # [B, 3, H, W]
+        recon = model.unpatchify(pred)
 
         imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
         imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
 
         recon = recon * imagenet_std + imagenet_mean
         inputs = inputs * imagenet_std + imagenet_mean
+        
 
         # Clamp for plotting
         recon = recon.clamp(0, 1)
         inputs = inputs.clamp(0, 1)
 
+        mask_img = unpatchify_mask(mask.cpu().numpy(), patch_size=16)
 
         # ---- PLOT ----
         fig, axes = plt.subplots(4, num_images, figsize=(num_images*2, 8))
         fig.suptitle("Original, Reconstruction, Mask Overlay, and Composite", fontsize=14)
 
         for i in range(num_images):
-            orig_img = inputs[i].cpu().permute(1, 2, 0).numpy()
-            recon_img = recon[i].cpu().permute(1, 2, 0).clamp(0, 1).numpy()
+            # Get the (H, W, 3) arrays
+            orig_img_rgb = inputs[i].cpu().permute(1, 2, 0).numpy()
+            recon_img_rgb = recon[i].cpu().permute(1, 2, 0).clamp(0, 1).numpy()
 
-            # mask[i, j] == True → patch was hidden
-            mask_bool = mask[i].bool().cpu().numpy().reshape(h, w)
-            mask_img = np.kron(mask_bool, np.ones((patch_size, patch_size))).astype(bool)
+            # --- NEW: Convert to (H, W) for grayscale plotting ---
+            # We just take the first channel (e.g., 'R')
+            orig_img = orig_img_rgb[:, :, 0]
+            recon_img = recon_img_rgb[:, :, 0]
 
             # Row 0: Original
-            axes[0, i].imshow(orig_img)
+            axes[0, i].imshow(orig_img, cmap="gray") # <-- Set cmap
             axes[0, i].set_title("Original", fontsize=9)
             axes[0, i].axis("off")
 
             # Row 1: Reconstruction
-            axes[1, i].imshow(recon_img)
+            axes[1, i].imshow(recon_img, cmap="gray") # <-- Set cmap
             axes[1, i].set_title("Reconstruction", fontsize=9)
             axes[1, i].axis("off")
 
-            # Row 2: Mask overlay (red = hidden)
-            axes[2, i].imshow(orig_img)
-            axes[2, i].imshow(~mask_img, cmap="Reds", alpha=0.3)
+            # Row 2: Mask overlay
+            axes[2, i].imshow(orig_img, cmap="gray") # <-- Set cmap
+            axes[2, i].imshow(mask_img[i, 0], cmap="Reds", alpha=0.3)
             axes[2, i].set_title("Masked Patches", fontsize=9)
             axes[2, i].axis("off")
 
-            # Row 3: Composite (orig for visible, recon for hidden)
-            mask_img_rgb = np.expand_dims(mask_img, axis=-1)  # (H, W, 1)
-            composite_img = np.where(mask_img_rgb, recon_img, orig_img)
+            # Row 3: Composite
+            mask_img_bw = mask_img[i, 0].cpu().numpy() # (H, W)
+            # --- NEW: Create composite from 2D grayscale images ---
+            composite_img = np.where(mask_img_bw, recon_img, orig_img)
 
-            axes[3, i].imshow(composite_img)
+            axes[3, i].imshow(composite_img, cmap="gray") # <-- Set cmap
             axes[3, i].set_title("Composite", fontsize=9)
             axes[3, i].axis("off")
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.savefig(filename)
         plt.close()
-
 
     
 if __name__ == "__main__":
@@ -177,6 +189,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_images', type=int, default=8, help="Number of images to reconstruct and display")
     parser.add_argument('--freeze_until', type=int, default=2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
     parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
+    parser.add_argument('--mask_ratio', type=float, default=0.75, help="Masking ratio for MAE reconstruction")  
     args = parser.parse_args()
 
 
@@ -189,5 +202,6 @@ if __name__ == "__main__":
         num_images=args.num_images,
         freeze_until=args.freeze_until,
         autoencoder_model=args.autoencoder_model,
-        pretrained_model=args.pretrained_model
+        pretrained_model=args.pretrained_model,
+        mask_ratio=args.mask_ratio
     )

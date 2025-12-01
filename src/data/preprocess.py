@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 from src.helper_functions import *
 import cv2
 from transformers import AutoImageProcessor
+import torchvision.transforms as transforms
+from PIL import Image
+
 
 
 
@@ -80,7 +83,7 @@ def process_and_save_crater_crops_mae(
     map_file,
     output_dir,
     offset,
-    save_crops=False,
+    save_raw_crops=True,
     save_np_array=True,
     output_path=None,
     batch_size=64,
@@ -91,8 +94,16 @@ def process_and_save_crater_crops_mae(
     craters_crs = get_craters_crs()
     N = len(filtered_craters)
 
-    # Initialize processor once
-    processor = AutoImageProcessor.from_pretrained(args.pretrained_model)
+    # === MAE preprocessing (ImageNet normalization) ===
+    mae_transform = transforms.Compose([
+        transforms.Resize(256, interpolation=Image.BICUBIC),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
 
     # Prepare memmap for saving preprocessed data
     crater_memmap = None
@@ -100,20 +111,17 @@ def process_and_save_crater_crops_mae(
         crater_memmap = np.memmap(
             output_path, dtype=np.float32, mode="w+", shape=(N, 3, 224, 224)
         )
-
-    # Open map file
+    
     with rasterio.open(map_file) as map_ref:
         transformer = pyproj.Transformer.from_crs(
             craters_crs, map_ref.crs.to_string(), always_xy=True
         )
 
-        batch_images = []
-        batch_indices = []
-
         for i, (_, crater) in enumerate(filtered_craters.iterrows()):
-            if i % 1000 == 0:
+            if i % 10000 == 0:
                 print(f"Processed {i}/{N}")
 
+            # Get crater image (now properly normalized to [0, 255] by crop_crater)
             crater_img = crop_crater(
                 map_ref,
                 crater["LAT_CIRC_IMG"],
@@ -124,32 +132,54 @@ def process_and_save_crater_crops_mae(
                 autoencoder_model
             )
 
-            # Ensure RGB
+            # === DIAGNOSTIC: Check first few crater stats ===
+            if i < 5:
+                print(f"\n=== Crater {i} RAW (after crop_crater) ===")
+                print(f"  Shape: {crater_img.shape}")
+                print(f"  Dtype: {crater_img.dtype}")
+                print(f"  Range: [{crater_img.min():.2f}, {crater_img.max():.2f}]")
+                print(f"  Mean: {crater_img.mean():.2f}")
+
+            # Ensure RGB (crater_img is grayscale)
             if crater_img.ndim == 2:
                 crater_img = np.stack([crater_img] * 3, axis=-1)
+            
+            if save_raw_crops:
+                crater_id = crater["CRATER_ID"]
+                np.save(os.path.join(output_dir, f"{crater_id}.npy"), crater_img)
 
-            batch_images.append(crater_img)
-            batch_indices.append(i)
+            # Convert NumPy to PIL and apply transforms
+            # crater_img should be uint8 in [0, 255] at this point
+            pil_img = Image.fromarray(crater_img.astype(np.uint8), mode="RGB")
+            tensor_img = mae_transform(pil_img)  # (3, 224, 224)
 
-            # Process and save batch
-            if len(batch_images) == batch_size or i == N - 1:
-                processed = processor(images=batch_images, return_tensors="np")
-                if crater_memmap is not None:
-                    crater_memmap[batch_indices] = processed["pixel_values"]
+            # === DIAGNOSTIC: Check normalized stats ===
+            if i < 5:
+                print(f"=== Crater {i} AFTER ImageNet normalization ===")
+                print(f"  Shape: {tensor_img.shape}")
+                print(f"  Range: [{tensor_img.min():.4f}, {tensor_img.max():.4f}]")
+                print(f"  Mean: {tensor_img.mean():.4f}")
+                print(f"  Per-channel means: {tensor_img.mean(dim=(1,2))}")
 
-                # Optionally save visual crops
-                if save_crops:
-                    for img, idx in zip(batch_images, batch_indices):
-                        crater_id = filtered_craters.iloc[idx]["CRATER_ID"]
-                        filename = os.path.join(output_dir, f"{crater_id}.jpeg")
-                        plt.imsave(filename, img.astype(np.uint8))
-
-                batch_images.clear()
-                batch_indices.clear()
+            # Save to memmap
+            if crater_memmap is not None:
+                crater_memmap[i] = tensor_img.numpy()
 
     if crater_memmap is not None:
         crater_memmap.flush()
-        print(f"✅ Finished processing {N} craters. Data saved to {output_path}")
+        print(f"\n✅ Finished processing {N} craters. Data saved to {output_path}")
+        
+        # === FINAL DIAGNOSTIC: Check overall statistics ===
+        print("\n=== OVERALL DATASET STATISTICS ===")
+        sample_size = min(1000, N)
+        sample_data = crater_memmap[:sample_size]
+        print(f"Sample size: {sample_size}")
+        print(f"Overall range: [{sample_data.min():.4f}, {sample_data.max():.4f}]")
+        print(f"Overall mean: {sample_data.mean():.4f}")
+        print(f"Overall std: {sample_data.std():.4f}")
+        print(f"Per-channel means: {sample_data.mean(axis=(0,2,3))}")
+        print(f"Per-channel stds: {sample_data.std(axis=(0,2,3))}")
+  
 
 def save_crater_metadata(filtered_craters, map_file, output_path):
     craters_crs = get_craters_crs()
@@ -202,7 +232,7 @@ if __name__ == '__main__':
     parser.add_argument('--latitude_bounds', type=float, nargs=2, default=[-60, 60])
     parser.add_argument('--offset', type=float, default=0.5)
     parser.add_argument('--craters_to_output', type=int, default=-1)
-    parser.add_argument('--save_crops', action='store_true')
+    parser.add_argument('--save_raw_crops', action='store_true')
     parser.add_argument('--save_np_array', action='store_true')
     parser.add_argument('--dst_height', type=int, default=100)
     parser.add_argument('--dst_width', type=int, default=100)
@@ -238,7 +268,7 @@ if __name__ == '__main__':
             args.map_file,
             args.output_dir,
             args.offset,
-            save_crops=args.save_crops,
+            save_raw_crops=args.save_raw_crops,
             save_np_array=args.save_np_array,
             output_path=args.np_output_path,
             batch_size=args.batch_size,

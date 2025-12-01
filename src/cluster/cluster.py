@@ -11,7 +11,12 @@ from torchvision import transforms
 from src.models.autoencoder import ConvAutoencoder
 from src.helper_functions import *
 from transformers import ViTMAEForPreTraining, AutoImageProcessor
+from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F
+import sys
+sys.path.append(os.path.abspath("src/models/mae"))
+from src.models.mae.models_mae import *
+#from src.models.mae import MAEWithBottleneck
 
 STATE_LABELS = {
     1: "New Crater",
@@ -27,14 +32,15 @@ STATE_COLORS = {
 }
 
 def load_images(imgs_dir, pretrained_model):
+    files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
+    states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
+
     if args.autoencoder_model == 'cnn':
         transform = transforms.Compose([
             transforms.Resize((100, 100)),
             transforms.ToTensor()
         ])
-        files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
-        states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
-
+        
         imgs = torch.stack([
             transform(Image.fromarray(
                 flip_crater(np.array(Image.open(os.path.join(imgs_dir, f)).convert("L")))
@@ -42,33 +48,37 @@ def load_images(imgs_dir, pretrained_model):
             for f in files
         ]).float()
 
-        return imgs, states, files  # (N,1,H,W)
-
     elif args.autoencoder_model == 'mae':
-        processor = AutoImageProcessor.from_pretrained(pretrained_model)
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor()
+        mae_transform = transforms.Compose([
+            transforms.Resize(256, interpolation=Image.BICUBIC),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
         ])
-        files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
-        states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
 
-        imgs = torch.stack([
-            transform(Image.fromarray(
-                flip_crater(np.array(Image.open(os.path.join(imgs_dir, f)).convert("L")))
-            ).convert("RGB"))
-            for f in files
-        ]).float()
+        # Apply transform directly in the loop
+        imgs_list = []
+        for f in files:
+            # 1. Load and process numpy array
+            img_arr = flip_crater(np.array(Image.open(os.path.join(imgs_dir, f)).convert("L")))
+            # 2. Convert back to PIL RGB
+            img_pil = Image.fromarray(img_arr).convert("RGB")
+            # 3. Apply MAE transform (returns Tensor)
+            img_tensor = mae_transform(img_pil)
+            imgs_list.append(img_tensor)
+            
+        imgs = torch.stack(imgs_list).float()
 
-        imgs = processor(images=list(imgs), return_tensors="pt", do_rescale=False)
-
-        return imgs, states, files  # (N,3,H,W)
+    return imgs, states, files  # Returns (N, C, H, W) Tensor
 
 
 
 
 def encode_images(inputs, model_path, bottleneck, device, out_latents, 
-out_states, states, freeze_until=-2,autoencoder_model="mae", pretrained_model='facebook/vit-mae-large'):
+out_states, states,mask_ratio=0.75, freeze_until=-2,autoencoder_model="mae", pretrained_model='facebook/vit-mae-large'):
 
     if args.autoencoder_model == 'cnn':
         model = ConvAutoencoder(latent_dim=bottleneck)
@@ -84,36 +94,39 @@ out_states, states, freeze_until=-2,autoencoder_model="mae", pretrained_model='f
         print(f"Saved latents to {out_latents}, states to {out_states}")
     
     elif args.autoencoder_model == 'mae':
-
-        model = ViTMAEForPreTraining.from_pretrained(pretrained_model)
-
-        # Freeze encoder except last N blocks
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in model.decoder.parameters():
-            param.requires_grad = True
-        for param in model.vit.encoder.layer[freeze_until:].parameters():
-            param.requires_grad = True
+        # Load pretrained MAE
+        model = mae_vit_large_patch16()
 
         try:
-            state_dict = torch.load(model_path, map_location=device)
-            model.load_state_dict(state_dict)
+            state_dict = torch.load(model_path, map_location="cpu")
+            msg = model.load_state_dict(state_dict, strict=False) # strict=False is often safer for MAE fine-tuning
             print(f"Successfully loaded MAE model weights from {model_path}")
+
         except Exception as e:
             print(f"Error loading state_dict for MAE model: {e}")
             return
-        
+
+        model.to(device) # Move model to GPU
         model.eval()
+        
+        # inputs is already a Tensor (N, 3, 224, 224)
+        inputs = inputs.to(device)
 
         with torch.no_grad():
-            inputs = {k: v for k, v in inputs.items()}
+            # z shape: [Batch_Size, N_Patches + 1, Embed_Dim]
+            z, _, _ = model.forward_encoder(inputs, mask_ratio=mask_ratio)
 
-            # Get hidden states from the encoder by a regular forward pass
-            outputs = model.vit(**inputs, output_hidden_states=True) 
-            latents = outputs.hidden_states[-1][:, 0, :]
+            # IMPORTANT: MAE outputs a sequence (patches). 
+            # For clustering, you usually want the CLS token (index 0) 
+            # or the mean of all patches.
+            
+            # Option A: Take the CLS token (usually best for classification/clustering)
+            latents = z[:, 0, :] 
+            
+            # Option B: Mean of all patches
+            # latents = z.mean(dim=1) 
 
-
-        np.save(out_latents, latents)
+        np.save(out_latents, latents.cpu().numpy())
         np.save(out_states, states)
         print(f"Saved latents to {out_latents}, states to {out_states}")
 
@@ -185,6 +198,7 @@ if __name__ == "__main__":
     enc.add_argument("--out-states", required=True)
     enc.add_argument("--freeze-until", type=int, default=-2)
     enc.add_argument("--pretrained-model", type=str, default='facebook/vit-mae-large')
+    enc.add_argument("--mask-ratio", type=float, default=0.75)
 
     # plot dots
     dots = subparsers.add_parser("plot-dots")

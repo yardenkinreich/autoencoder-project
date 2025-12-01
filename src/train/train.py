@@ -8,9 +8,13 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, Cosin
 import matplotlib.pyplot as plt
 from src.models.autoencoder import ConvAutoencoder
 import timm
-from transformers import ViTMAEForPreTraining
+#from transformers import ViTMAEForPreTraining
 import torch.optim as optim
-
+from src.helper_functions import *
+import torchvision.transforms as T
+import sys
+sys.path.append(os.path.abspath("src/models/mae"))
+from src.models.mae.models_mae import *
 
 def main(args):
 
@@ -135,6 +139,8 @@ def main(args):
         sample_indices = rng.choice(len(craters), size=num_samples, replace=False)
         craters_subset = craters[sample_indices]
 
+        print(f"Data range: min={craters_subset.min()}, max={craters_subset.max()}, mean={craters_subset.mean()}")
+
         dataset = TensorDataset(torch.from_numpy(craters_subset))
 
         # --- Train/val split (deterministic) ---
@@ -150,17 +156,36 @@ def main(args):
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
         # Load pretrained MAE
-        model = ViTMAEForPreTraining.from_pretrained(args.pretrained_model)
+        model = mae_vit_large_patch16()
+        # Load pretrained weights
+        checkpoint = torch.load("src/models/mae/mae_finetuned_vit_large.pth", map_location="cpu")
 
-        # --- Freeze encoder except last N blocks --- 
-        for param in model.parameters():
-            param.requires_grad = False
+        msg = model.load_state_dict(checkpoint['model'], strict=False)
+        print(f"Loaded pretrained MAE weights: {msg}")
 
-        for param in model.decoder.parameters():
+        for name, param in model.named_parameters():
+            param.requires_grad = False  # freeze everything
+
+        # Unfreeze only the last few encoder layers
+        for blk in model.blocks[args.freeze_until:]:
+            for param in blk.parameters():
+                param.requires_grad = True
+
+        # Optionally unfreeze the decoder (if you want to fine-tune reconstruction)
+        for param in model.decoder_blocks.parameters():
             param.requires_grad = True
 
-        for param in model.vit.encoder.layer[args.freeze_until:].parameters():
-            param.requires_grad = True
+        model.to(device)
+
+        # data_training augmentations
+        train_transforms = T.Compose([
+            T.RandomVerticalFlip(p=0.5),
+        
+            # This "wiggles" the image: rotates, scales, and shifts it a little.
+            T.RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        
+            T.RandomErasing(p=0.25, scale=(0.02, 0.1), ratio=(0.3, 3.3)),
+        ])
 
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                 lr=args.lr, weight_decay=args.weight_decay)
@@ -173,20 +198,19 @@ def main(args):
 
         train_losses, val_losses = [], []
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {device}")
-        model.to(device)
+        print(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
+        print(f"Mask ratio: {args.mask_ratio}")
+
 
         for epoch in range(args.epochs):
             model.train()
             running_train_loss = 0.0
             for batch in train_loader:
                 imgs = batch[0].to(device)
-                inputs = {"pixel_values": imgs}
+                #inputs = {"pixel_values": imgs}
+                #imgs = train_transforms(imgs)
 
-                # Correct forward pass and loss extraction
-                outputs = model(**inputs, mask_ratio=args.mask_ratio)
-                loss = outputs.loss
+                loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -202,12 +226,11 @@ def main(args):
             with torch.no_grad():
                 for batch in val_loader:
                     imgs = batch[0].to(device)
-                    inputs = {"pixel_values": imgs}
+                    #inputs = {"pixel_values": imgs}
                     
-                    # The model requires keyword arguments and returns a ModelOutput object
-                    outputs = model(**inputs, mask_ratio=args.mask_ratio) 
-                    val_loss = outputs.loss
-                    
+                    val_loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
+
+
                     running_val_loss += val_loss.item() * imgs.size(0)
 
                 epoch_val_loss = running_val_loss / len(val_loader.dataset)
@@ -247,17 +270,14 @@ def main(args):
 
         with torch.no_grad():
             model.eval()
-            for i in range(0, len(craters), args.batch_size):
-                batch = torch.tensor(craters[i:i+args.batch_size], device=device)
-                inputs = {"pixel_values": batch}
+            for i in range(0, len(craters_subset), args.batch_size):
+                batch = torch.tensor(craters_subset[i:i+args.batch_size], device=device)
+                #inputs = {"pixel_values": batch}
 
-                # Get hidden states from the encoder by a regular forward pass
-                outputs = model.vit(**inputs, output_hidden_states=True) 
-                
-                # Get CLS token
-                latent_vectors_batch = outputs.hidden_states[-1][:, 0, :]
+                # Forward encoder (with masking)
+                latent, mask, ids_restore = model.forward_encoder(batch, mask_ratio=args.mask_ratio)
 
-                latent_list.append(latent_vectors_batch.cpu().numpy())
+                latent_list.append(latent.cpu().numpy())
 
         # Concatenate all
         latent_vectors = np.concatenate(latent_list, axis=0)
@@ -283,8 +303,8 @@ if __name__ == "__main__":
     parser.add_argument('--min_lr', type=float, default=1e-8, help="Minimum learning rate")
     parser.add_argument('--lr_factor', type=float, default=0.5, help="Factor to reduce LR by")
     parser.add_argument('--num_samples', type=int, default=None, help="Number of craters to sample for training")
-    parser.add_argument('--freeze_until', type=int, default=2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
+    parser.add_argument('--freeze_until', type=int, default=-2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
     parser.add_argument('--mask_ratio', type=float, default=0.75, help="Masking ratio for MAE training")
-    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
+#    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
     args = parser.parse_args()
-    main(args)
+    main(args) 

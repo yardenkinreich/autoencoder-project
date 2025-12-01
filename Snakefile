@@ -7,15 +7,16 @@ import shutil
 AUTOENCODER_MODEL = "mae"  # "cnn" or "mae"
 LATENT_DIM = 64
 PRETRAINED_MODEL = "facebook/vit-mae-large"
-FREEZE_UNTIL = -2  # number of encoder transformer blocks to freeze from the end (negative number)
+FREEZE_UNTIL = -8  # number of encoder transformer blocks to freeze from the end (negative number)
 TECHNIQUE = "pca" # "pca" or "tsne"
 NUM_CLUSTERS = 4
 CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
 EPOCHS = 50 # number of training epochs
+MASK_RATIO = 0.75  # masking ratio for MAE training
 
 # --- Define the run name once ---
 #RUN_NAME = f"{AUTOENCODER_MODEL}_{}" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range, 500 for epochs
-RUN_NAME = "-2_100_42025-10-26"
+RUN_NAME = "-8_50_facemae_0.75"  # example: "-4_100_facemae_0.75_no_transforms_weightdecay"
 
 RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{PRETRAINED_MODEL}/{RUN_NAME}"
 os.makedirs(RUN_DIR, exist_ok=True)
@@ -23,18 +24,23 @@ os.makedirs(RUN_DIR, exist_ok=True)
 # Create subfolders inside the run directory
 MODELS_DIR = f"{RUN_DIR}/models"
 RESULTS_DIR = f"{RUN_DIR}/results"
+TEST_DIR = f"{RUN_DIR}/tests/edge_cases"
 os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(TEST_DIR, exist_ok=True)
 
 # --- Snapshot Snakefile ---
 if os.path.exists("Snakefile"):
     shutil.copy("Snakefile", f"{RUN_DIR}/Snakefile.snapshot")
 
 # --- Config toggle ---
-RUN_PREPROCESS = True  # Set to true to run preprocessing
+RUN_PREPROCESS = False  # Set to true to run preprocessing
 RUN_DISPLAY = True # Set to true to display clusters on mosaic
 RUN_CLUSTER_JULIE = True  # Set to true to run clustering on Julie's dataset
 
+# --- Download pretrained model if needed ---
+#if AUTOENCODER_MODEL == "mae":
+#    wget https://dl.fbaipublicfiles.com/mae/pretrain/mae_pretrain_vit_base.pth -O src/models/mae/pretrain_mae_vit_base_full.pth
 
 # --- Rule all ---
 rule all:
@@ -54,14 +60,13 @@ rule all:
         f"{RUN_DIR}/summary.txt",
         f"{RUN_DIR}/dag.pdf"
 
-
-
+# --- Data Preprocessing Rule ---
 rule preprocess_craters:
     input:
         map_file="data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif",
         craters_csv="data/raw/lunar_crater_database_robbins_2018.csv"
     output:
-        output_dir=directory(f"data/processed/{AUTOENCODER_MODEL}"),
+        output_dir=directory(f"data/processed/{AUTOENCODER_MODEL}/crater_crops"),
         np_output=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
         metadata_output=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv"
     params:
@@ -89,7 +94,7 @@ rule preprocess_craters:
             --latitude_bounds {params.lat_min} {params.lat_max} \
             --offset {params.offset} \
             --craters_to_output {params.craters_to_output} \
-            --save_crops \
+            --save_raw_crops \
             --save_np_array \
             --dst_height {params.dst_height} \
             --dst_width {params.dst_width} \
@@ -98,6 +103,121 @@ rule preprocess_craters:
             --pretrained_model {params.pretrained_model}
         """
 
+rule check_preprocess:
+    input:
+        npy=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
+        csv=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv",
+        crops_dir=f"data/processed/{AUTOENCODER_MODEL}/crater_crops"
+    output:
+        f"{RESULTS_DIR}/preprocess_verification.png"
+    params:
+        num_samples=4
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/test/evaluate.py data_check \
+            --npy-path {input.npy} \
+            --csv-path {input.csv} \
+            --crops-dir {input.crops_dir} \
+            --num-samples {params.num_samples} \
+            --output-png {output}
+        """
+
+# --- Configuration for Edge Case Testing ---
+
+# Define the specific scenarios you want to stress test
+EDGE_CASES = {
+    "zero_mask":   {"mask": 0.01,  "batch": 32, "desc": "Checks identity mapping (no masking)"},
+    "extreme_mask":{"mask": 0.99, "batch": 32, "desc": "Checks numerical stability with sparse signal"},
+    "tiny_batch":  {"mask": 0.75, "batch": 2,  "desc": "Checks broadcasting/shape errors with small batches"}
+}
+
+# --- Edge Case Testing Rules ---
+
+rule test_all_edge_cases:
+    """
+    Target rule to run all edge case tests.
+    """
+    input:
+        expand(f"{TEST_DIR}/{{case}}/reconstructions.png", case=EDGE_CASES.keys())
+
+rule train_edge_case:
+    """
+    Trains the model on a tiny subset of data with specific edge-case parameters.
+    """
+    input:
+        npy = f"data/processed/{AUTOENCODER_MODEL}/craters.npy"
+    output:
+        model  = f"{TEST_DIR}/{{case}}/autoencoder.pth",
+        loss   = f"{TEST_DIR}/{{case}}/loss_curve.png",
+        latent = f"{TEST_DIR}/{{case}}/latent_vectors.npy"
+    params:
+        autoencoder_model = AUTOENCODER_MODEL,
+        # Fast settings for testing
+        epochs = 5,              # Just enough to see if the loop finishes
+        num_samples = 256,       # Tiny subset of data
+        # Dynamic params based on the wildcards (case)
+        batch_size = lambda wildcards: EDGE_CASES[wildcards.case]["batch"],
+        masked_ratio = lambda wildcards: EDGE_CASES[wildcards.case]["mask"],
+        # Constants
+        latent_dim = LATENT_DIM,
+        weight_decay = 0.05,
+        lr = 1e-4,
+        min_lr=1e-6,
+        freeze_until = FREEZE_UNTIL,
+        pretrained_model = PRETRAINED_MODEL
+    shell:
+        """
+        # Using the same script, but injecting test parameters
+        PYTHONPATH=$(pwd) python src/train/train.py \
+        --autoencoder_model {params.autoencoder_model} \
+        --input {input.npy} \
+        --model_output {output.model} \
+        --loss_plot {output.loss} \
+        --latent_output {output.latent} \
+        --epochs {params.epochs} \
+        --batch_size {params.batch_size} \
+        --latent_dim {params.latent_dim} \
+        --lr {params.lr} \
+        --min_lr {params.min_lr} \
+        --num_samples {params.num_samples} \
+        --weight_decay {params.weight_decay} \
+        --freeze_until {params.freeze_until} \
+        --mask_ratio {params.masked_ratio}
+        """
+
+rule reconstruct_edge_case:
+    """
+    Generates visualizations for the edge case models.
+    """
+    input:
+        npy = f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
+        model = f"{TEST_DIR}/{{case}}/autoencoder.pth"
+    output:
+        reconstructions = f"{TEST_DIR}/{{case}}/reconstructions.png"
+    params:
+        autoencoder_model = AUTOENCODER_MODEL,
+        device = "cpu",
+        num_images = 8,
+        latent_dim = LATENT_DIM,
+        freeze_until = FREEZE_UNTIL,
+        # Match the mask ratio used during the training of this specific case
+        mask_ratio = lambda wildcards: EDGE_CASES[wildcards.case]["mask"]
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/train/reconstruct.py \
+        --autoencoder_model {params.autoencoder_model} \
+        --input {input.npy} \
+        --model {input.model} \
+        --device {params.device} \
+        --file_outq {output.reconstructions} \
+        --num_images {params.num_images} \
+        --latent_dim {params.latent_dim} \
+        --freeze_until {params.freeze_until} \
+        --mask_ratio {params.mask_ratio}
+        """
+
+# --- Main Training and Evaluation Rules ---
+        
 rule train_autoencoder:
     input:
         npy=f"data/processed/{AUTOENCODER_MODEL}/craters.npy"
@@ -108,16 +228,16 @@ rule train_autoencoder:
     params:
         autoencoder_model=AUTOENCODER_MODEL,
         epochs= EPOCHS,
-        batch_size=400,
+        batch_size=64,
         latent_dim=LATENT_DIM,
-        lr=1e-3,
-        weight_decay=0.05,
+        lr=1e-2,
+        weight_decay=1e-5,
         lr_patience=3,
-        min_lr=1e-6,
+        min_lr=1e-4,
         lr_factor=0.5,
         num_samples = 50000,
         freeze_until= FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
-        masked_ratio=0.75,  # Masking ratio for MAE training        
+        masked_ratio=MASK_RATIO,  # Masking ratio for MAE training        
         pretrained_model=PRETRAINED_MODEL
 
     shell:
@@ -153,6 +273,7 @@ rule reconstruct_craters:
         device="cpu",
         num_images=8,
         latent_dim=LATENT_DIM,
+        mask_ratio = MASK_RATIO,
         freeze_until = FREEZE_UNTIL  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
         
     shell:
@@ -165,7 +286,8 @@ rule reconstruct_craters:
             --file_outq {output.reconstructions} \
             --num_images {params.num_images} \
             --latent_dim {params.latent_dim} \
-            --freeze_until {params.freeze_until}
+            --freeze_until {params.freeze_until} \
+            --mask_ratio {params.mask_ratio}
         """
 
 
@@ -180,7 +302,8 @@ rule encode_latents:
         autoencoder_model=AUTOENCODER_MODEL,
         bottleneck=LATENT_DIM,
         freeze_until = FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
-        pretrained_model=PRETRAINED_MODEL
+        pretrained_model=PRETRAINED_MODEL,
+        mask_ratio=MASK_RATIO
     shell:
         """
         PYTHONPATH=$(pwd) python src/cluster/cluster.py encode \
@@ -191,6 +314,7 @@ rule encode_latents:
             --out-states {output.states} \
             --freeze-until {params.freeze_until} \
             --autoencoder-model {AUTOENCODER_MODEL} \
+            --mask-ratio {params.mask_ratio} \
             --pretrained-model {params.pretrained_model}
         """
 

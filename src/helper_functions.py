@@ -7,9 +7,12 @@ import random
 import rasterio
 import pandas as pd
 import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
+
 try:
     import cupy as cp
-    import cudf
+#    import cudf
     from cuml.manifold import TSNE as cuTSNE
     from cuml.decomposition import PCA as cuPCA
     from cuml.cluster import KMeans as cuKMeans
@@ -57,9 +60,17 @@ def crop_crater(map_ref, lat, lon, diameter, offset, transformer, autoencoder_mo
 
     flipped_image = flip_crater(cropped_image_projected)
 
-    if autoencoder_model == "mae":
-        flipped_image = cv2.resize(flipped_image, (224, 224), interpolation=cv2.INTER_CUBIC)
-
+    # Normalize each crater to [0, 255] ===
+    img_min = flipped_image.min()
+    img_max = flipped_image.max()
+    
+    if img_max > img_min:
+        # Stretch contrast to use full [0, 255] range
+        flipped_image = ((flipped_image.astype(np.float32) - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+    else:
+        # Handle edge case: uniform image (shouldn't happen but safe)
+        flipped_image = np.full_like(flipped_image, 128, dtype=np.uint8)
+    
     return flipped_image
 
 
@@ -154,6 +165,48 @@ def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None, ran
     plt.close(fig_diagonal)
     
     return fig_regular, fig_diagonal, embedding_cpu, cluster_labels_cpu
+
+
+def vicreg_regularizer(z, gamma_var=1.0, gamma_cov=1.0, eps=1e-4):
+    """
+    z: [batch, latent_dim] bottleneck embeddings
+    gamma_var, gamma_cov: weights for variance and covariance penalties
+    """
+    # --- Variance loss ---
+    std = torch.sqrt(z.var(dim=0) + eps)
+    var_loss = torch.mean(F.relu(1 - std))
+
+    # --- Covariance loss ---
+    z_centered = z - z.mean(dim=0)
+    cov = (z_centered.T @ z_centered) / (z.shape[0] - 1)
+    off_diag = cov - torch.diag(torch.diag(cov))
+    cov_loss = (off_diag ** 2).sum() / z.shape[1]
+
+    return gamma_var * var_loss + gamma_cov * cov_loss
+
+def smooth_entropy_regularizer(z, temperature=0.1, gamma_ent=0.1):
+    """
+    Encourages local structure while avoiding hard cluster collapse.
+    """
+    sim = torch.cdist(z, z, p=2)  # pairwise distances
+    sim = torch.exp(-sim / temperature)
+    q = sim / sim.sum(dim=1, keepdim=True)
+    ent = - (q * torch.log(q + 1e-8)).sum(dim=1).mean()
+    return -gamma_ent * ent  # maximize entropy (soft structure)
+
+def unpatchify_mask(mask, patch_size=16, img_size=224):
+    """
+    Convert a [B, num_patches] boolean mask into an image-space binary mask [B, 1, H, W].
+    Each patch is upsampled to patch_size×patch_size.
+    """
+    B, num_patches = mask.shape
+    h = w = int(num_patches ** 0.5)
+    mask = mask.reshape(B, h, w)
+    mask = np.kron(mask, np.ones((patch_size, patch_size)))  # upsample
+    mask = torch.tensor(mask).unsqueeze(1).float()  # (B, 1, H, W)
+    return mask
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="Cluster and plot latent vectors.")

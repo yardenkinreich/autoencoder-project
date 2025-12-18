@@ -8,6 +8,8 @@ import argparse
 import pandas as pd
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, fowlkes_mallows_score
 import sys
+from sklearn.metrics import confusion_matrix
+import pandas as pd
 
 # --- Project Root Configuration ---
 # Add the project root to Python's module search path
@@ -149,35 +151,43 @@ def evaluate_model_edge_cases():
     pass
 
 
-def compare_clusters(technique, cluster_method, num_clusters, use_gpu, out_df):
+def compare_clusters(technique, cluster_method, num_clusters, use_gpu, out_dir):
     """Compare your clustering results to Julie's ground truth clusters."""
 
     print("--- Running Cluster Comparison ---")
     
     # Load latent representations and ground-truth labels
-    # NOTE: Update these paths to point to your actual data files!
-    latents = np.load("/home/yardenk/autoencoder_project/logs/mae/facebook/vit-mae-large/-2_100_42025-10-26/results/latents_julie.npy")  # your latent vectors
-    states = np.load("/home/yardenk/autoencoder_project/logs/mae/facebook/vit-mae-large/-2_100_42025-10-26/results/states_julie.npy")  # ground truth labels (1–4)
+    latents = np.load(os.path.join(out_dir, "latents_julie_with_flip.npy"))  # your latent vectors
+    states = np.load(os.path.join(out_dir, "states_julie_with_flip.npy"))     # ground truth labels (1–4)
 
     # Run clustering (returns predicted cluster labels)
-    # This function is expected to return Matplotlib figure objects, embeddings, and predicted labels.
-    fig_reg, fig_diag, emb, labels = cluster_and_plot(
+    fig_reg, emb, labels = cluster_and_plot(
         latent=latents,
         technique=technique,
         n_clusters=num_clusters,
-        save_path=os.path.dirname(out_df),
+        save_path=out_dir,
         use_gpu=use_gpu,
-        cluster_method=cluster_method # Passing cluster_method
+        cluster_method=cluster_method,
+        imgs_dir="data/raw/craters_for_danny"
     )
     
-    # Optionally save the figures
-    # fig_reg.savefig(os.path.join(os.path.dirname(out_df), "cluster_regular.png"))
-    # fig_diag.savefig(os.path.join(os.path.dirname(out_df), "cluster_diagnostic.png"))
+    # Save the figures
+    fig_reg.savefig(os.path.join(out_dir, "cluster_regular.png"))
 
     # Compute similarity metrics (labels vs ground truth)
     ari = adjusted_rand_score(states, labels)
     nmi = normalized_mutual_info_score(states, labels)
     fmi = fowlkes_mallows_score(states, labels)
+
+
+
+    ct = pd.crosstab(states, labels)
+    ct_norm = ct.div(ct.sum(axis=1), axis=0)
+    print(ct)
+    print(ct_norm)
+
+    from scipy.stats import spearmanr
+    spearmanr(labels, states)
 
     print(f"\nCluster similarity with Julie's ground truth:")
     print(f"Adjusted Rand Index (ARI): {ari:.3f}")
@@ -185,15 +195,15 @@ def compare_clusters(technique, cluster_method, num_clusters, use_gpu, out_df):
     print(f"Fowlkes–Mallows Index (FMI): {fmi:.3f}")
 
     # Save results
-    os.makedirs(os.path.dirname(out_df), exist_ok=True)
-    with open(out_df, "w") as f:
+    os.makedirs(out_dir, exist_ok=True)  # ✓ Create the directory
+    metrics_file = os.path.join(out_dir, "cluster_metrics.csv")  # ✓ File path
+    with open(metrics_file, "w") as f:
         f.write("metric,value\n")
         f.write(f"ARI,{ari:.4f}\n")
         f.write(f"NMI,{nmi:.4f}\n")
         f.write(f"FMI,{fmi:.4f}\n")
 
-    print(f"\nSaved metrics to {out_df}")
-
+    print(f"\nSaved metrics to {metrics_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

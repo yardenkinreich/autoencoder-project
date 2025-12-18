@@ -11,8 +11,6 @@ import torchvision.transforms as transforms
 from PIL import Image
 
 
-
-
 def load_and_filter_craters(craters_csv, min_diameter, max_diameter, latitude_bounds, craters_to_output):
     craters = pd.read_csv(craters_csv)
     filtered = craters[
@@ -94,23 +92,20 @@ def process_and_save_crater_crops_mae(
     craters_crs = get_craters_crs()
     N = len(filtered_craters)
 
-    # === MAE preprocessing (ImageNet normalization) ===
-    mae_transform = transforms.Compose([
+    # === Step 1: First pass - collect all images in [0, 1] range ===
+    mae_transform_no_norm = transforms.Compose([
         transforms.Resize(256, interpolation=Image.BICUBIC),
         transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+        transforms.ToTensor()  # Just converts to [0, 1]
     ])
 
-    # Prepare memmap for saving preprocessed data
-    crater_memmap = None
+    temp_memmap = None
     if save_np_array and output_path is not None:
-        crater_memmap = np.memmap(
-            output_path, dtype=np.float32, mode="w+", shape=(N, 3, 224, 224)
+        temp_memmap = np.memmap(
+            output_path + ".temp", dtype=np.float32, mode="w+", shape=(N, 3, 224, 224)
         )
+    
+    print("=== PASS 1: Loading images ===")
     
     with rasterio.open(map_file) as map_ref:
         transformer = pyproj.Transformer.from_crs(
@@ -121,7 +116,6 @@ def process_and_save_crater_crops_mae(
             if i % 10000 == 0:
                 print(f"Processed {i}/{N}")
 
-            # Get crater image (now properly normalized to [0, 255] by crop_crater)
             crater_img = crop_crater(
                 map_ref,
                 crater["LAT_CIRC_IMG"],
@@ -132,15 +126,6 @@ def process_and_save_crater_crops_mae(
                 autoencoder_model
             )
 
-            # === DIAGNOSTIC: Check first few crater stats ===
-            if i < 5:
-                print(f"\n=== Crater {i} RAW (after crop_crater) ===")
-                print(f"  Shape: {crater_img.shape}")
-                print(f"  Dtype: {crater_img.dtype}")
-                print(f"  Range: [{crater_img.min():.2f}, {crater_img.max():.2f}]")
-                print(f"  Mean: {crater_img.mean():.2f}")
-
-            # Ensure RGB (crater_img is grayscale)
             if crater_img.ndim == 2:
                 crater_img = np.stack([crater_img] * 3, axis=-1)
             
@@ -148,37 +133,111 @@ def process_and_save_crater_crops_mae(
                 crater_id = crater["CRATER_ID"]
                 np.save(os.path.join(output_dir, f"{crater_id}.npy"), crater_img)
 
-            # Convert NumPy to PIL and apply transforms
-            # crater_img should be uint8 in [0, 255] at this point
             pil_img = Image.fromarray(crater_img.astype(np.uint8), mode="RGB")
-            tensor_img = mae_transform(pil_img)  # (3, 224, 224)
+            tensor_img = mae_transform_no_norm(pil_img)
 
-            # === DIAGNOSTIC: Check normalized stats ===
-            if i < 5:
-                print(f"=== Crater {i} AFTER ImageNet normalization ===")
-                print(f"  Shape: {tensor_img.shape}")
-                print(f"  Range: [{tensor_img.min():.4f}, {tensor_img.max():.4f}]")
-                print(f"  Mean: {tensor_img.mean():.4f}")
-                print(f"  Per-channel means: {tensor_img.mean(dim=(1,2))}")
+            if temp_memmap is not None:
+                temp_memmap[i] = tensor_img.numpy()
 
-            # Save to memmap
-            if crater_memmap is not None:
-                crater_memmap[i] = tensor_img.numpy()
-
-    if crater_memmap is not None:
-        crater_memmap.flush()
-        print(f"\n✅ Finished processing {N} craters. Data saved to {output_path}")
+    if temp_memmap is None:
+        print("Error: temp_memmap is None")
+        return
+    
+    temp_memmap.flush()
+    
+    # === Step 2: Compute dataset mean and std ===
+    print("\n=== Computing dataset statistics ===")
+    
+    chunk_size = 1000
+    
+    # STEP 2A: Compute overall mean
+    print("Computing mean...")
+    sum_pixels = np.zeros(3, dtype=np.float64)
+    total_pixels = 0
+    
+    for start_idx in range(0, N, chunk_size):
+        end_idx = min(start_idx + chunk_size, N)
+        chunk = temp_memmap[start_idx:end_idx]
+        sum_pixels += chunk.sum(axis=(0, 2, 3))  # Sum per channel
+        total_pixels += chunk.shape[0] * chunk.shape[2] * chunk.shape[3]
+    
+    dataset_mean = sum_pixels / total_pixels
+    
+    # STEP 2B: Compute overall std using the mean
+    print("Computing std...")
+    sum_squared_diff = np.zeros(3, dtype=np.float64)
+    
+    for start_idx in range(0, N, chunk_size):
+        end_idx = min(start_idx + chunk_size, N)
+        chunk = temp_memmap[start_idx:end_idx]
         
-        # === FINAL DIAGNOSTIC: Check overall statistics ===
-        print("\n=== OVERALL DATASET STATISTICS ===")
-        sample_size = min(1000, N)
-        sample_data = crater_memmap[:sample_size]
-        print(f"Sample size: {sample_size}")
-        print(f"Overall range: [{sample_data.min():.4f}, {sample_data.max():.4f}]")
-        print(f"Overall mean: {sample_data.mean():.4f}")
-        print(f"Overall std: {sample_data.std():.4f}")
-        print(f"Per-channel means: {sample_data.mean(axis=(0,2,3))}")
-        print(f"Per-channel stds: {sample_data.std(axis=(0,2,3))}")
+        for c in range(3):
+            diff = chunk[:, c, :, :] - dataset_mean[c]
+            sum_squared_diff[c] += (diff ** 2).sum()
+    
+    dataset_std = np.sqrt(sum_squared_diff / total_pixels)
+    
+    print(f"\n=== DATASET STATISTICS (CORRECT) ===")
+    print(f"Mean per channel (R, G, B): {dataset_mean}")
+    print(f"Std per channel (R, G, B): {dataset_std}")
+    print(f"Total pixels used: {total_pixels:,}")
+    
+    # Sanity check
+    if np.any(dataset_std < 0.01):
+        print("⚠️  WARNING: Very low std detected. Craters might be too similar.")
+    if np.any(dataset_std > 0.5):
+        print("⚠️  WARNING: Very high std detected. Might have outliers.")
+    
+    # === Step 3: Second pass - apply dataset normalization ===
+    print("\n=== PASS 2: Applying dataset normalization ===")
+    
+    crater_memmap = np.memmap(
+        output_path, dtype=np.float32, mode="w+", shape=(N, 3, 224, 224)
+    )
+    
+    for start_idx in range(0, N, chunk_size):
+        if start_idx % 10000 == 0:
+            print(f"Normalizing {start_idx}/{N}")
+        
+        end_idx = min(start_idx + chunk_size, N)
+        chunk = temp_memmap[start_idx:end_idx].copy()  # Make a copy
+        
+        # Apply normalization: (x - mean) / std
+        for c in range(3):
+            chunk[:, c, :, :] = (chunk[:, c, :, :] - dataset_mean[c]) / (dataset_std[c] + 1e-8)
+        
+        crater_memmap[start_idx:end_idx] = chunk
+    
+    crater_memmap.flush()
+    
+    # Clean up temp file
+    del temp_memmap
+    os.remove(output_path + ".temp")
+    
+    print(f"\n✅ Finished processing {N} craters. Data saved to {output_path}")
+    
+    # === FINAL DIAGNOSTIC ===
+    print("\n=== FINAL NORMALIZED DATASET STATISTICS ===")
+    sample_size = min(1000, N)
+    sample_data = crater_memmap[:sample_size]
+    print(f"Sample size: {sample_size}")
+    print(f"Overall range: [{sample_data.min():.4f}, {sample_data.max():.4f}]")
+    print(f"Overall mean: {sample_data.mean():.4f} (should be ~0)")
+    print(f"Overall std: {sample_data.std():.4f} (should be ~1)")
+    print(f"Per-channel means: {sample_data.mean(axis=(0,2,3))} (should be ~[0, 0, 0])")
+    print(f"Per-channel stds: {sample_data.std(axis=(0,2,3))} (should be ~[1, 1, 1])")
+    
+    # Check for outliers
+    print(f"\n=== OUTLIER CHECK ===")
+    print(f"Values < -3: {(sample_data < -3).sum()} pixels")
+    print(f"Values > 3: {(sample_data > 3).sum()} pixels")
+    print(f"99th percentile: {np.percentile(sample_data, 99):.4f}")
+    print(f"1st percentile: {np.percentile(sample_data, 1):.4f}")
+    
+    # Save statistics for later use
+    stats_path = output_path.replace('.dat', '_stats.npz')
+    np.savez(stats_path, mean=dataset_mean, std=dataset_std)
+    print(f"\nSaved normalization statistics to {stats_path}")
   
 
 def save_crater_metadata(filtered_craters, map_file, output_path):

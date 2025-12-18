@@ -92,86 +92,93 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
             print(f"Error loading state_dict for MAE model: {e}")
             return
 
-        for name, param in model.named_parameters():
-            param.requires_grad = False  # freeze everything
-
-        # Unfreeze only the last few encoder layers
-        for blk in model.blocks[freeze_until:]:
-            for param in blk.parameters():
-                param.requires_grad = True
-
-        # Optionally unfreeze the decoder (if you want to fine-tune reconstruction)
-        for param in model.decoder_blocks.parameters():
-            param.requires_grad = True
-
-        model.to(device)
+        model.to(device) 
         model.eval()
 
         # Take a batch
         inputs = next(iter(loader))[0].to(device)
 
-
         with torch.no_grad():
-            loss, pred, mask = model(inputs, mask_ratio)
+            torch.manual_seed(42)
+            _ , pred, mask = model(inputs, mask_ratio)
 
         print("pred shape:", pred.shape)
         print("mask shape:", mask.shape)
         print("patch size:", model.patch_embed.patch_size)
 
         # reconstruct images from patch logits
+
         recon = model.unpatchify(pred)
 
-        imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-        imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+        # De-normalize
+        mean = torch.tensor([0.27261323, 0.27261323, 0.27261323], device=device).view(1, 3, 1, 1)
+        std = torch.tensor([0.0973839, 0.0973839, 0.0973839], device=device).view(1, 3, 1, 1)
 
-        recon = recon * imagenet_std + imagenet_mean
-        inputs = inputs * imagenet_std + imagenet_mean
-        
+        recon = recon * std + mean
+        inputs = inputs * std + mean
 
-        # Clamp for plotting
+        # Clamp
         recon = recon.clamp(0, 1)
         inputs = inputs.clamp(0, 1)
 
-        mask_img = unpatchify_mask(mask.cpu().numpy(), patch_size=16)
+        # Create mask image
+        mask_img = unpatchify_mask(mask.cpu().numpy())  # (B, 1, H, W)
 
-        # ---- PLOT ----
-        fig, axes = plt.subplots(4, num_images, figsize=(num_images*2, 8))
-        fig.suptitle("Original, Reconstruction, Mask Overlay, and Composite", fontsize=14)
+        # DEBUG: Check mask_img values
+        print(f"mask_img shape: {mask_img.shape}")
+        print(f"mask_img unique: {np.unique(mask_img)}")
+        print(f"mask_img mean: {mask_img.mean()}")
+
+        masked_recon = recon.clone()
+        for i in range(len(masked_recon)):
+            # mask_img[i] is already a tensor, shape (1, H, W)
+            mask_single = mask_img[i]  # (1, 224, 224)
+            
+            # Repeat to 3 channels: (3, 224, 224)
+            mask_3ch = mask_single.repeat(3, 1, 1)
+            
+            # Where mask==0 (visible), set to gray (0.5)
+            masked_recon[i] = torch.where(
+                mask_3ch > 0.5,
+                masked_recon[i],  # Keep reconstruction for masked patches
+                torch.full_like(masked_recon[i], 0.5)  # Gray out visible patches
+            )
+
+        fig, axes = plt.subplots(5, num_images, figsize=(num_images*2, 10))  # 5 rows now
+        fig.suptitle("MAE Reconstruction Analysis", fontsize=14)
 
         for i in range(num_images):
-            # Get the (H, W, 3) arrays
-            orig_img_rgb = inputs[i].cpu().permute(1, 2, 0).numpy()
-            recon_img_rgb = recon[i].cpu().permute(1, 2, 0).clamp(0, 1).numpy()
-
-            # --- NEW: Convert to (H, W) for grayscale plotting ---
-            # We just take the first channel (e.g., 'R')
-            orig_img = orig_img_rgb[:, :, 0]
-            recon_img = recon_img_rgb[:, :, 0]
-
+            orig_img = inputs[i].cpu().permute(1, 2, 0).numpy()[:, :, 0]
+            recon_img = recon[i].cpu().permute(1, 2, 0).numpy()[:, :, 0]
+            masked_recon_img = masked_recon[i].cpu().permute(1, 2, 0).numpy()[:, :, 0]
+            
             # Row 0: Original
-            axes[0, i].imshow(orig_img, cmap="gray") # <-- Set cmap
+            axes[0, i].imshow(orig_img, cmap="gray")
             axes[0, i].set_title("Original", fontsize=9)
             axes[0, i].axis("off")
 
-            # Row 1: Reconstruction
-            axes[1, i].imshow(recon_img, cmap="gray") # <-- Set cmap
-            axes[1, i].set_title("Reconstruction", fontsize=9)
+            # Row 1: Full Reconstruction
+            axes[1, i].imshow(recon_img, cmap="gray")
+            axes[1, i].set_title("Full Recon", fontsize=9)
             axes[1, i].axis("off")
 
-            # Row 2: Mask overlay
-            axes[2, i].imshow(orig_img, cmap="gray") # <-- Set cmap
-            axes[2, i].imshow(mask_img[i, 0], cmap="Reds", alpha=0.3)
-            axes[2, i].set_title("Masked Patches", fontsize=9)
+            # Row 2: ONLY Masked Reconstructions (visible = gray)
+            axes[2, i].imshow(masked_recon_img, cmap="gray")
+            axes[2, i].set_title("Masked Only", fontsize=9)
             axes[2, i].axis("off")
 
-            # Row 3: Composite
-            mask_img_bw = mask_img[i, 0].cpu().numpy() # (H, W)
-            # --- NEW: Create composite from 2D grayscale images ---
-            composite_img = np.where(mask_img_bw, recon_img, orig_img)
-
-            axes[3, i].imshow(composite_img, cmap="gray") # <-- Set cmap
-            axes[3, i].set_title("Composite", fontsize=9)
+            # Row 3: Mask overlay
+            axes[3, i].imshow(orig_img, cmap="gray")
+            axes[3, i].imshow(mask_img[i, 0].cpu().numpy(), cmap="Reds", alpha=0.3)
+            axes[3, i].set_title("Masked Patches", fontsize=9)
             axes[3, i].axis("off")
+
+            # Row 4: Composite
+            mask_img_bw = mask_img[i, 0].cpu().numpy()
+            composite_img = np.where(mask_img_bw > 0.5, recon_img, orig_img)
+            axes[4, i].imshow(composite_img, cmap="gray")
+            axes[4, i].set_title("Composite", fontsize=9)
+            axes[4, i].axis("off")
 
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.savefig(filename)

@@ -7,7 +7,7 @@ import shutil
 AUTOENCODER_MODEL = "mae"  # "cnn" or "mae"
 LATENT_DIM = 64
 PRETRAINED_MODEL = "facebook/vit-mae-large"
-FREEZE_UNTIL = -8  # number of encoder transformer blocks to freeze from the end (negative number)
+FREEZE_UNTIL = 0 # number of encoder transformer blocks to freeze from the end (negative number)
 TECHNIQUE = "pca" # "pca" or "tsne"
 NUM_CLUSTERS = 4
 CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
@@ -16,7 +16,7 @@ MASK_RATIO = 0.75  # masking ratio for MAE training
 
 # --- Define the run name once ---
 #RUN_NAME = f"{AUTOENCODER_MODEL}_{}" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range, 500 for epochs
-RUN_NAME = "-8_50_facemae_0.75"  # example: "-4_100_facemae_0.75_no_transforms_weightdecay"
+RUN_NAME = "nofreeze_50_facemae_0.75_lower_lr_dataset_norm_augmentations"  # example: "-4_100_facemae_0.75_no_transforms_weightdecay"
 
 RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{PRETRAINED_MODEL}/{RUN_NAME}"
 os.makedirs(RUN_DIR, exist_ok=True)
@@ -228,12 +228,12 @@ rule train_autoencoder:
     params:
         autoencoder_model=AUTOENCODER_MODEL,
         epochs= EPOCHS,
-        batch_size=64,
+        batch_size=128,
         latent_dim=LATENT_DIM,
         lr=1e-2,
         weight_decay=1e-5,
         lr_patience=3,
-        min_lr=1e-4,
+        min_lr=1e-6,
         lr_factor=0.5,
         num_samples = 50000,
         freeze_until= FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
@@ -267,7 +267,7 @@ rule reconstruct_craters:
         npy=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
         model=f"{MODELS_DIR}/autoencoder.pth"
     output:
-        reconstructions=f"{MODELS_DIR}/reconstructions.png"
+        reconstructions=f"{MODELS_DIR}/reconstructions_try.png"
     params:
         autoencoder_model=AUTOENCODER_MODEL,
         device="cpu",
@@ -296,7 +296,7 @@ rule encode_latents:
         imgs_dir="data/raw/craters_for_danny",
         model=f"{MODELS_DIR}/autoencoder.pth"
     output:
-        latents=f"{RESULTS_DIR}/latents_julie.npy",
+        latents=f"{RESULTS_DIR}/latents_julie_with_flip.npy",
         states=f"{RESULTS_DIR}/states_julie.npy"
     params:
         autoencoder_model=AUTOENCODER_MODEL,
@@ -320,10 +320,10 @@ rule encode_latents:
 
 rule plot_latent_dots:
     input:
-        latents=f"{RESULTS_DIR}/latents_julie.npy",
+        latents=f"{RESULTS_DIR}/latents_julie_with_flip.npy",
         states=f"{RESULTS_DIR}/states_julie.npy"
     output:
-        f"{RESULTS_DIR}/clustering_julie_dots_{TECHNIQUE}.png"
+        f"{RESULTS_DIR}/clustering_julie_with_flip_dots_{TECHNIQUE}.png"
     params:
         technique = TECHNIQUE,
         model_name = AUTOENCODER_MODEL
@@ -339,7 +339,7 @@ rule plot_latent_dots:
 
 rule plot_latent_imgs:
     input:
-        latents=f"{RESULTS_DIR}/latents_julie.npy",
+        latents=f"{RESULTS_DIR}/latents_julie_with_flip.npy",
         imgs_dir="data/raw/craters_for_danny"
     output:
         f"{RESULTS_DIR}/clustering_julie_imgs_{TECHNIQUE}.png"

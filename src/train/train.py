@@ -11,10 +11,11 @@ import timm
 #from transformers import ViTMAEForPreTraining
 import torch.optim as optim
 from src.helper_functions import *
-import torchvision.transforms as T
+import torchvision.transforms.v2 as T
 import sys
 sys.path.append(os.path.abspath("src/models/mae"))
 from src.models.mae.models_mae import *
+
 
 def main(args):
 
@@ -164,28 +165,37 @@ def main(args):
         print(f"Loaded pretrained MAE weights: {msg}")
 
         for name, param in model.named_parameters():
-            param.requires_grad = False  # freeze everything
+            param.requires_grad = True  # freeze everything
 
+        '''
         # Unfreeze only the last few encoder layers
         for blk in model.blocks[args.freeze_until:]:
             for param in blk.parameters():
                 param.requires_grad = True
 
-        # Optionally unfreeze the decoder (if you want to fine-tune reconstruction)
+        # Optionally unfreeze the decoder
         for param in model.decoder_blocks.parameters():
             param.requires_grad = True
+        '''
+        
 
         model.to(device)
 
         # data_training augmentations
         train_transforms = T.Compose([
             T.RandomVerticalFlip(p=0.5),
-        
-            # This "wiggles" the image: rotates, scales, and shifts it a little.
-            T.RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-        
-            T.RandomErasing(p=0.25, scale=(0.02, 0.1), ratio=(0.3, 3.3)),
-        ])
+            T.RandomRotation(degrees=5),
+            T.ColorJitter(
+                brightness=0.2,
+                contrast=0.3,
+            ),
+            T.GaussianNoise(mean=0.0, sigma=0.01),
+            T.RandomErasing(
+                p=0.2,
+                scale=(0.02, 0.06),
+                ratio=(0.5, 2.0),
+            ),
+            ])
 
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                 lr=args.lr, weight_decay=args.weight_decay)
@@ -207,8 +217,7 @@ def main(args):
             running_train_loss = 0.0
             for batch in train_loader:
                 imgs = batch[0].to(device)
-                #inputs = {"pixel_values": imgs}
-                #imgs = train_transforms(imgs)
+                imgs = train_transforms(imgs)
 
                 loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
 

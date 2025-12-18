@@ -9,6 +9,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+from PIL import Image
 
 try:
     import cupy as cp
@@ -19,14 +21,17 @@ try:
 
     GPU_AVAILABLE = True
 except ImportError:
-    from sklearn.manifold import TSNE
-    from sklearn.decomposition import PCA
-    from sklearn.cluster import KMeans
-    from sklearn.preprocessing import StandardScaler
-    GPU_AVAILABLE = False
+    pass
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+GPU_AVAILABLE = False
 from matplotlib import colors
 import argparse
 import os
+from PIL import Image
+from torchvision import transforms
 
 
 # Data Preprocessing Functions
@@ -60,18 +65,55 @@ def crop_crater(map_ref, lat, lon, diameter, offset, transformer, autoencoder_mo
 
     flipped_image = flip_crater(cropped_image_projected)
 
-    # Normalize each crater to [0, 255] ===
-    img_min = flipped_image.min()
-    img_max = flipped_image.max()
+    return flipped_image
+
+def normalize_image_to_imagenet_stats(image_path):
+    """
+    Normalize a PNG image to have ImageNet mean and std.
+    Input:
+        image_path: path to PNG file
+    Output:
+        normalized_image: 3D numpy array (3, 224, 224) with ImageNet normalization applied
+    """
+    # Load the PNG image and convert to greyscale
+    pil_img = Image.open(image_path).convert('L')  # 'L' mode = greyscale
+    
+    # Convert to numpy array
+    img_array = np.array(pil_img)
+    
+    # Flip crater so shadow is always on the right
+    img_array = flip_crater(img_array)
+    
+    # Normalize to [0, 255] range with contrast stretching
+    img_min = img_array.min()
+    img_max = img_array.max()
     
     if img_max > img_min:
-        # Stretch contrast to use full [0, 255] range
-        flipped_image = ((flipped_image.astype(np.float32) - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+        img_array = ((img_array.astype(np.float32) - img_min) / (img_max - img_min) * 255).astype(np.uint8)
     else:
-        # Handle edge case: uniform image (shouldn't happen but safe)
-        flipped_image = np.full_like(flipped_image, 128, dtype=np.uint8)
+        img_array = np.full_like(img_array, 128, dtype=np.uint8)
     
-    return flipped_image
+    # Convert greyscale to RGB by stacking 3 times (for ImageNet normalization)
+    img_array = np.stack([img_array] * 3, axis=-1)
+    
+    # Convert to PIL for transforms
+    pil_img = Image.fromarray(img_array, mode='RGB')
+    
+    # Apply MAE-style transforms
+    mae_transform = transforms.Compose([
+        transforms.Resize(256, interpolation=Image.BICUBIC),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),  # Converts to [0,1] and changes to (C, H, W)
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+    
+    tensor_img = mae_transform(pil_img)  # (3, 224, 224)
+    
+    return tensor_img
+
 
 
 def flip_crater(img):
@@ -92,18 +134,29 @@ def flip_crater(img):
     return img
 
 
-def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None, random_state=42, use_gpu=False):
+def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None, 
+                     random_state=42, use_gpu=False, cluster_method='kmeans',imgs_dir=None):
     """
-    Cluster a latent space using KMeans and visualize it in 2D using PCA or t-SNE.
+    Cluster a latent space using KMeans or other methods and visualize in 2D using PCA or t-SNE.
     Can use GPU via RAPIDS cuML if available and use_gpu=True.
+    
+    Returns:
+        fig_regular: Regular clustering visualization
+        fig_diagonal: Diagonal-sorted clustering visualization
+        embedding_cpu: 2D embedding coordinates
+        cluster_labels_cpu: Predicted cluster labels
     """
-
+    # Load latents
     if isinstance(latent, str):
         latents = np.load(latent)
     else:       
         latents = latent
 
-    # Ensure latent is on CPU or GPU
+    # Validation
+    if latents.shape[0] < n_clusters:
+        raise ValueError(f"Number of samples ({latents.shape[0]}) must be >= n_clusters ({n_clusters})")
+    
+    # Standardize
     if use_gpu and GPU_AVAILABLE:
         latents = cp.array(latents)
         mean = cp.mean(latents, axis=0)
@@ -111,61 +164,145 @@ def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None, ran
         latents = (latents - mean) / (std + 1e-8)
     else:
         latents = StandardScaler().fit_transform(latents)
-
-     # --- KMeans clustering ---
-    cluster_labels = cuKMeans(n_clusters=n_clusters, random_state=random_state).fit_predict(
-        latents) if use_gpu and GPU_AVAILABLE else KMeans(n_clusters=n_clusters, random_state=random_state).fit_predict(latents)
-
-    cluster_labels_cpu = cp.asnumpy(cluster_labels) if use_gpu and GPU_AVAILABLE else cluster_labels
     
     # --- Dimensionality reduction ---
+    
     if technique.lower() == 'pca':
         if use_gpu and GPU_AVAILABLE:
-            reducer = cuPCA(n_components=2, random_state=random_state)
+            reducer = cuPCA(n_components=0.95, random_state=random_state)
         else:
-            reducer = PCA(n_components=2, random_state=random_state)
-    elif technique.lower() == 'tsne':
+            reducer = PCA(n_components=0.95, random_state=random_state)
+
+    embedding_lower_dim = reducer.fit_transform(latents)
+
+    print("Original latent dim:", latents.shape[1])
+    print("After PCA (95% variance):", embedding_lower_dim.shape[1])
+
+    # --- Clustering ---
+
+    cluster_method = cluster_method.lower()
+    if cluster_method == 'kmeans':
         if use_gpu and GPU_AVAILABLE:
-            reducer = cuTSNE(n_components=2, random_state=random_state, perplexity=100)
+            cluster_labels = cuKMeans(n_clusters=n_clusters, random_state=random_state).fit_predict(embedding_lower_dim)
+            cluster_labels_cpu = cp.asnumpy(cluster_labels)
         else:
-            reducer = TSNE(n_components=2, random_state=random_state, perplexity=100)
+            cluster_labels = KMeans(n_clusters=n_clusters, random_state=random_state).fit_predict(embedding_lower_dim)
+            cluster_labels_cpu = cluster_labels
+    else:
+        raise ValueError(f"Unknown cluster_method: {cluster_method}. Supported: 'kmeans'")
+    
+    # --- Plotting Tactic ---
+
+    n_samples = latents.shape[0] if not use_gpu else int(latents.shape[0])
+    if technique.lower() == 'pca':
+        if use_gpu and GPU_AVAILABLE:
+            plot_reduce = cuPCA(n_components=2, random_state=random_state)
+        else:
+            plot_reduce = PCA(n_components=2, random_state=random_state)
+
+    elif technique.lower() == 'tsne':
+        #perplexity = min(30, max(5, n_samples // 3))  # Adaptive
+        if use_gpu and GPU_AVAILABLE:
+            plot_reduce = cuTSNE(n_components=2, random_state=random_state)
+        else:
+            plot_reduce = TSNE(n_components=2, random_state=random_state)
     else:
         raise ValueError("technique must be 'pca' or 'tsne'")
     
-    embedding = reducer.fit_transform(latents)
+    embedding = plot_reduce.fit_transform(embedding_lower_dim)
     embedding_cpu = cp.asnumpy(embedding) if use_gpu and GPU_AVAILABLE else embedding
     
-    # --- Plotting  ---
+    # --- Plotting ---
+    cmap = plt.cm.get_cmap('tab10' if n_clusters <= 10 else 'tab20')
 
-    fig_regular, ax = plt.subplots(figsize=(6, 6))
-    cmap = plt.colormaps['cubehelix'].resampled(n_clusters)
-    ax.scatter(embedding_cpu[:,0], embedding_cpu[:,1], c=cluster_labels_cpu, cmap=cmap, s=10)
-    ax.set_title(f"{technique.upper()} clustering")
+    fig_regular, ax = plt.subplots(figsize=(8, 6))
+
+    if imgs_dir is None:
+        scatter = ax.scatter(
+            embedding_cpu[:,0],
+            embedding_cpu[:,1],
+            c=cluster_labels_cpu,
+            cmap=cmap,
+            s=20,
+            alpha=0.6
+        )
+        plt.colorbar(scatter, ax=ax, label='Cluster')
+    else:
+        scatter_images(
+            ax=ax,
+            coords=embedding_cpu,
+            labels=cluster_labels_cpu,
+            imgs_dir=imgs_dir,
+            cmap=cmap,
+            xlabel="PCA 1",
+            ylabel="PCA 2",
+            title="PCA + KMeans Clustering with Images"
+            )
+
+    '''
+    ax.set_xlabel(f'{technique.upper()} Component 1')
+    ax.set_ylabel(f'{technique.upper()} Component 2')
+    ax.set_title(f"{technique.upper()} Clustering (k={n_clusters}, method={cluster_method})")
+    ax.axis("off")
+    '''
     
-    # Diagonal plot
-    diagonal_scores = -(embedding_cpu[:,0]) + (embedding_cpu[:,1])
-    cluster_scores = [(c, diagonal_scores[cluster_labels_cpu==c].mean()) for c in np.unique(cluster_labels_cpu)]
-    sorted_clusters = [c for c,_ in sorted(cluster_scores, key=lambda x:x[1], reverse=True)]
-    remap_dict = {old:new for new,old in enumerate(sorted_clusters)}
-    remapped_labels = np.vectorize(remap_dict.get)(cluster_labels_cpu)
-    
-    fig_diagonal, ax2 = plt.subplots(figsize=(6,6))
-    ax2.scatter(embedding_cpu[:,0],
-                embedding_cpu[:,1],
-                c=remapped_labels, cmap=cmap, s=10)
-    ax2.set_title(f"{technique.upper()} clusters (diagonal-sorted)")
-    
+    # Save if path provided
     if save_path:
-        import os
         os.makedirs(save_path, exist_ok=True)
-        fig_regular.savefig(f"{save_path}/{technique}_clusters_regular.png", dpi=300, bbox_inches='tight')
-        fig_diagonal.savefig(f"{save_path}/{technique}_clusters_diagonal.png", dpi=300, bbox_inches='tight')
+        fig_regular.savefig(f"{save_path}/{technique}_clusters_regular_k{n_clusters}_{cluster_method}.png", 
+                           dpi=300, bbox_inches='tight')
+        print(f"Saved plots to {save_path}")
     
-    plt.close(fig_regular)
-    plt.close(fig_diagonal)
-    
-    return fig_regular, fig_diagonal, embedding_cpu, cluster_labels_cpu
+    # Return in the format expected by compare_clusters
+    return fig_regular, embedding_cpu, cluster_labels_cpu
 
+
+def scatter_images(ax, coords, labels, imgs_dir, cmap=None,
+                   xlabel="Component 1", ylabel="Component 2", title="Latent space"):
+    """
+    Scatter images at 2D coordinates with cluster-colored borders.
+    
+    Args:
+        ax: matplotlib Axes to plot on
+        coords: (N,2) array of 2D coordinates
+        labels: array of cluster labels (for border color)
+        imgs_dir: folder with .png images
+        img_size: int, size of the images in points
+        cmap: matplotlib colormap for clusters
+        xlabel, ylabel, title: strings for plot labeling
+    """
+    files = sorted([
+    os.path.join(imgs_dir, f)
+    for f in os.listdir(imgs_dir)
+    if f.endswith(".png") and os.path.isfile(os.path.join(imgs_dir, f))
+    ])
+    assert len(files) == len(coords), "Number of images must match number of samples"
+
+    for (x, y), lbl, fname in zip(coords, labels, files):
+        img = Image.open(fname).convert("L")  # grayscale PIL image
+        img_arr = np.array(img)                     # numeric array
+        imgbox = OffsetImage(img_arr, zoom=0.15, cmap="gray")  # now grayscale works
+
+        # Border only, not zoomed
+        ab = AnnotationBbox(
+            imgbox,
+            (x, y),
+            frameon=True,
+            pad=0,  # space between image and border
+            bboxprops=dict(
+                edgecolor=cmap(lbl % cmap.N) if cmap else "black",
+                linewidth=1
+            )
+        )
+        ax.add_artist(ab)
+
+    # Set axis labels and title
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.axis("on")  # keep axes visible
+    ax.update_datalim(coords)
+    ax.autoscale()
 
 def vicreg_regularizer(z, gamma_var=1.0, gamma_cov=1.0, eps=1e-4):
     """

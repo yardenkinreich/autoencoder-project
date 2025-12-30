@@ -13,7 +13,7 @@ sys.path.append(os.path.abspath("src/models/mae"))
 from src.models.mae.models_mae import *
 
 
-def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
+def save_reconstructions(model_path, npy_path, autoencoder_model="cae",
                          device="cpu",latent_dim=6 , filename="models/reconstructions.png", num_images=8, freeze_until=-2, pretrained_model='facebook/vit-mae-large', mask_ratio=0.75):
     seed = 42
     np.random.seed(seed)
@@ -21,21 +21,25 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    if autoencoder_model == "cnn":
-    
+    if autoencoder_model == "cae":
         # Load data
-        data = np.load(npy_path)  # shape: (N, H, W) or (N, H, W, C)
-        data = data.astype(np.float32)
-        data = data.reshape(-1, 1, 100, 100)  # (N, 1, H, W)
-        
-        data = data[:num_images]
-        data = torch.tensor(data)
+        file_size = os.path.getsize(npy_path)
+        N = file_size // (224 * 224 * 1 * 4)
+        craters = np.memmap(
+            npy_path,
+            dtype=np.float32,
+            mode="r",
+            shape=(N, 1, 224, 224)
+        )
 
-        # Create dataset and loader
-        dataset = TensorDataset(data)
+        rng = np.random.default_rng(seed)
+        sample_indices = rng.choice(len(craters), size=num_images, replace=False)
+        craters_subset = craters[sample_indices]
+
+        dataset = TensorDataset(torch.from_numpy(craters_subset))
         loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
 
-        model = ConvAutoencoder(latent_dim=6).to(device)
+        model = ConvAutoencoder(latent_dim=latent_dim).to(device)
         model.load_state_dict(torch.load(model_path, map_location=device))
 
         model.to(device)
@@ -44,7 +48,7 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
         # Take a batch
         inputs = next(iter(loader))[0].to(device)
         with torch.no_grad():
-            outputs = model(inputs, mask_ratio)
+            outputs = model(inputs)
 
         # Plot originals and reconstructions
         fig, axes = plt.subplots(2, num_images, figsize=(num_images*2, 4))
@@ -80,7 +84,7 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
         loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
 
         # Load pretrained MAE
-        model = mae_vit_large_patch16()
+        model = mae_vit_base_patch16()
 
         try:
             state_dict = torch.load(model_path, map_location="cpu")
@@ -187,7 +191,7 @@ def save_reconstructions(model_path, npy_path, autoencoder_model="cnn",
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--autoencoder_model', type=str, choices=['cnn','mae'], default='cnn')
+    parser.add_argument('--autoencoder_model', type=str, choices=['cae','mae'], default='cae')
     parser.add_argument('--input', required=True, help="Path to crater npy file")
     parser.add_argument('--model', required=True, help="Path to trained model")
     parser.add_argument('--device', default="cpu", help="Device to run the model on")

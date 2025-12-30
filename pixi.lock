@@ -192,6 +192,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/h11-0.16.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/h2-4.3.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/harfbuzz-12.1.0-h15599e2_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/hdbscan-0.8.41-py311h0372a8f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/hdf5-1.14.6-nompi_h6e4c0c1_103.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/hf-xet-1.1.10-py310h77a0e7f_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/hicolor-icon-theme-0.17-ha770c72_2.tar.bz2
@@ -500,6 +501,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/pygments-2.19.2-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/rapidsai/linux-64/pylibcudf-24.12.00-cuda12_py311_241211_gff41ecf473_0.conda
       - conda: https://conda.anaconda.org/rapidsai/linux-64/pylibraft-24.12.00-cuda12_py311_241211_geaf9cc72_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/pynndescent-0.5.13-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/rapidsai/linux-64/pynvjitlink-0.7.0-12.9_py311_250625_3693c9cd_hd6618c4.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pynvml-11.4.1-pyhd8ed1ab_0.tar.bz2
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyogrio-0.11.0-py311hf6089d3_0.conda
@@ -612,6 +614,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ucx-1.17.0-h1b0e7dc_4.conda
       - conda: https://conda.anaconda.org/rapidsai/linux-64/ucx-py-0.41.00-py311_241211_ga8638cd_0.conda
       - conda: https://conda.anaconda.org/rapidsai/linux-64/ucxx-0.41.00-cuda12_py3.11_241211_gd355f9c_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/umap-learn-0.5.9.post2-py311h38be061_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/unicodedata2-16.0.0-py311h49ec1c0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/uri-template-1.3.0-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/uriparser-0.9.8-hac33072_0.conda
@@ -3283,6 +3286,25 @@ packages:
   purls: []
   size: 2058414
   timestamp: 1759365674184
+- conda: https://conda.anaconda.org/conda-forge/linux-64/hdbscan-0.8.41-py311h0372a8f_0.conda
+  sha256: 8a2522f26281f34ad859b88ecf3a96a717223e7eefee06dcb95cc9b6e0fb0c6c
+  md5: ca01ef9e5d26b65a99931ea7ccefb64a
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - joblib >=1.0
+  - libgcc >=14
+  - numpy <3,>=1.20
+  - numpy >=1.23,<3
+  - python >=3.11,<3.12.0a0
+  - python_abi 3.11.* *_cp311
+  - scikit-learn >=1.6
+  - scipy >=1.0
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/hdbscan?source=hash-mapping
+  size: 609551
+  timestamp: 1765731575906
 - conda: https://conda.anaconda.org/conda-forge/linux-64/hdf5-1.14.6-nompi_h6e4c0c1_103.conda
   sha256: 4f173af9e2299de7eee1af3d79e851bca28ee71e7426b377e841648b51d48614
   md5: c74d83614aec66227ae5199d98852aaf
@@ -7821,6 +7843,23 @@ packages:
   license: Apache-2.0
   size: 326533
   timestamp: 1733947605676
+- conda: https://conda.anaconda.org/conda-forge/noarch/pynndescent-0.5.13-pyhd8ed1ab_1.conda
+  sha256: fd7f81cfed1a04883261e2ebd73677066f5040c4ed7984e870c9c931069f9398
+  md5: 87b563f2388f452cedb6a878b738c7dc
+  depends:
+  - llvmlite >=0.30
+  - numba >=0.46
+  - numpy >=1.13
+  - python >=3.9
+  - scikit-learn >=0.19
+  - scipy >=1.0
+  - setuptools
+  license: BSD-2-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/pynndescent?source=hash-mapping
+  size: 49630
+  timestamp: 1734193646381
 - conda: https://conda.anaconda.org/rapidsai/linux-64/pynvjitlink-0.7.0-12.9_py311_250625_3693c9cd_hd6618c4.conda
   build_number: 0
   sha256: 4567c2d0fdc2686cae64dacef98cfd32fb7cdd475e84971beac03bbe73a5e6b9
@@ -9585,6 +9624,26 @@ packages:
   license_family: BSD
   size: 496800
   timestamp: 1733945240281
+- conda: https://conda.anaconda.org/conda-forge/linux-64/umap-learn-0.5.9.post2-py311h38be061_1.conda
+  sha256: 7ed51c9814178c569e9e4bda5201bf6248ceb590400f8ed80f31dce43a612803
+  md5: a04154826e9d2f86f617301fbbd25e87
+  depends:
+  - numba >=0.51.2
+  - numpy >=1.17
+  - pynndescent >=0.5
+  - python >=3.11,<3.12.0a0
+  - python_abi 3.11.* *_cp311
+  - scikit-learn >=0.22
+  - scipy >=1.3.1
+  - setuptools
+  - tbb >=2019.0
+  - tqdm
+  license: BSD-2-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/umap-learn?source=hash-mapping
+  size: 196234
+  timestamp: 1765401022451
 - conda: https://conda.anaconda.org/conda-forge/linux-64/unicodedata2-16.0.0-py311h49ec1c0_1.conda
   sha256: e2715a04632d75de539c1510238886ff1d6fc5b7e9e2ec240d8c11c175c1fffd
   md5: 3457bd5c93b085bec51cdab58fbd1882

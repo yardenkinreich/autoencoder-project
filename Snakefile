@@ -4,21 +4,27 @@ import shutil
 
 
 # --- Parameters of the Run ---
-AUTOENCODER_MODEL = "mae"  # "cnn" or "mae"
-LATENT_DIM = 64
-PRETRAINED_MODEL = "facebook/vit-mae-large"
+AUTOENCODER_MODEL = "mae"  # "cae" or "mae"
+LATENT_DIM = 40
+PRETRAINED_MODEL = "facebook/vit-mae-base"  # for MAE: "facebook/vit-mae-base" or "facebook/vit-mae-large"
 FREEZE_UNTIL = 0 # number of encoder transformer blocks to freeze from the end (negative number)
-TECHNIQUE = "pca" # "pca" or "tsne"
+TECHNIQUE = "pca" # visulization tecnique "pca" or "tsne" or "umap"
 NUM_CLUSTERS = 4
-CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm"
+CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm" or "spectral" or "agglomerative" or "hdbscan"
 EPOCHS = 50 # number of training epochs
 MASK_RATIO = 0.75  # masking ratio for MAE training
+MIN_DIAMETER = 1.0
+MAX_DIAMETER = 10.0
 
 # --- Define the run name once ---
-#RUN_NAME = f"{AUTOENCODER_MODEL}_{}" # fr for freeze_until, l2 for weight decay, 1_10 for diameter range, 500 for epochs
-RUN_NAME = "nofreeze_50_facemae_0.75_lower_lr_dataset_norm_augmentations"  # example: "-4_100_facemae_0.75_no_transforms_weightdecay"
-
-RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{PRETRAINED_MODEL}/{RUN_NAME}"
+if AUTOENCODER_MODEL == "cae":
+    RUN_NAME = f"{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}_{LATENT_DIM}"  # example: "-4_100_facemae_0.75_no_transforms_weightdecay"
+    RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{RUN_NAME}"
+elif AUTOENCODER_MODEL == "mae":
+    RUN_NAME = f"{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}__mask{MASK_RATIO}_freeze{FREEZE_UNTIL}"
+    RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{PRETRAINED_MODEL}/{RUN_NAME}"
+else:
+    raise ValueError("Unsupported AUTOENCODER_MODEL. Choose 'cae' or 'mae'.")
 os.makedirs(RUN_DIR, exist_ok=True)
 
 # Create subfolders inside the run directory
@@ -49,8 +55,6 @@ rule all:
         f"{MODELS_DIR}/autoencoder.pth",
         f"{MODELS_DIR}/loss_curve.png",
         f"{MODELS_DIR}/reconstructions.png",
-        # optional preprocessing
-        *([f"data/processed/{AUTOENCODER_MODEL}/craters.npy", f"data/processed/{AUTOENCODER_MODEL}/metadata.csv"] if RUN_PREPROCESS else []),
         # optional cluster Julie's dataset
         *([f"{RESULTS_DIR}/clustering_dots_{TECHNIQUE}.png",
            f"{RESULTS_DIR}/clustering_imgs_{TECHNIQUE}.png"] if RUN_CLUSTER_JULIE else []),
@@ -70,17 +74,15 @@ rule preprocess_craters:
         np_output=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
         metadata_output=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv"
     params:
-        min_diameter=1.0,
-        max_diameter=10.0,
+        min_diameter=MIN_DIAMETER,
+        max_diameter=MAX_DIAMETER,
         lat_min=-60,
         lat_max=60,
-        offset=0.5,
+        offset=0.5,  # in crater diameters
         craters_to_output=-1,   # -1 for all craters
-        dst_height=100,
-        dst_width=100,
-        autoencoder_model=AUTOENCODER_MODEL, # "cnn" or "mae"
         batch_size = 64,
-        pretrained_model = PRETRAINED_MODEL
+        autoencoder_model = AUTOENCODER_MODEL,
+        target_size = 224   
     shell:
         """
         PYTHONPATH=$(pwd) python src/data/preprocess.py \
@@ -96,11 +98,9 @@ rule preprocess_craters:
             --craters_to_output {params.craters_to_output} \
             --save_raw_crops \
             --save_np_array \
-            --dst_height {params.dst_height} \
-            --dst_width {params.dst_width} \
             --autoencoder_model {params.autoencoder_model} \
             --batch_size {params.batch_size} \
-            --pretrained_model {params.pretrained_model}
+            --target_size {params.target_size}
         """
 
 rule check_preprocess:
@@ -224,21 +224,22 @@ rule train_autoencoder:
     output:
         model=f"{MODELS_DIR}/autoencoder.pth",
         loss=f"{MODELS_DIR}/loss_curve.png",
-        latent=f"{MODELS_DIR}/latent_vectors.npy"
     params:
         autoencoder_model=AUTOENCODER_MODEL,
         epochs= EPOCHS,
-        batch_size=128,
+        batch_size=64,
         latent_dim=LATENT_DIM,
-        lr=1e-2,
+        lr=1e-3,
         weight_decay=1e-5,
         lr_patience=3,
-        min_lr=1e-6,
+        min_lr=1e-5,
         lr_factor=0.5,
         num_samples = 50000,
         freeze_until= FREEZE_UNTIL,  # For MAE: number of encoder transformer blocks to freeze from the end (negative number)
         masked_ratio=MASK_RATIO,  # Masking ratio for MAE training        
-        pretrained_model=PRETRAINED_MODEL
+        pretrained_model=PRETRAINED_MODEL,
+        num_clusters = NUM_CLUSTERS,
+        cluster_weight = 0.0
 
     shell:
         """
@@ -247,7 +248,6 @@ rule train_autoencoder:
             --input {input.npy} \
             --model_output {output.model} \
             --loss_plot {output.loss} \
-            --latent_output {output.latent} \
             --epochs {params.epochs} \
             --batch_size {params.batch_size} \
             --latent_dim {params.latent_dim} \
@@ -258,7 +258,7 @@ rule train_autoencoder:
             --num_samples {params.num_samples} \
             --weight_decay {params.weight_decay} \
             --freeze_until {params.freeze_until} \
-            --mask_ratio {params.masked_ratio}
+            --mask_ratio {params.masked_ratio} 
         """
 
 
@@ -296,8 +296,8 @@ rule encode_latents:
         imgs_dir="data/raw/craters_for_danny",
         model=f"{MODELS_DIR}/autoencoder.pth"
     output:
-        latents=f"{RESULTS_DIR}/latents_julie_with_flip.npy",
-        states=f"{RESULTS_DIR}/states_julie.npy"
+        latents=f"{RESULTS_DIR}/latents.npy",
+        states=f"{RESULTS_DIR}/states.npy"
     params:
         autoencoder_model=AUTOENCODER_MODEL,
         bottleneck=LATENT_DIM,

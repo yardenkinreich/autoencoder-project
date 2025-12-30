@@ -6,7 +6,7 @@ format: pdf
 
 # Project Overview
 
-This report summarizes the run of the CNN 20 Latent Variable with L2 Regulation pipeline, including training results, reconstructions, and clustering.
+This report summarizes the run of the cae 20 Latent Variable with L2 Regulation pipeline, including training results, reconstructions, and clustering.
 
 
 ## Dataset
@@ -74,14 +74,14 @@ summary(model, (1, 100, 100))
 
 ## Model Reconstruction Figure
 
-![](../models/reconstructions_cnn_20_l2.png){width=100%}
+![](../models/reconstructions_cae_20_l2.png){width=100%}
 
 
 ## Plot Clustering of PCA on Latent Variables: Julie D. Stopar Craters with Labels
 
-![](../results/clustering_cnn_20_l2_dots.png){width=100%}
+![](../results/clustering_cae_20_l2_dots.png){width=100%}
 
 
 ## Plot Clustering of PCA on Latent Variables: Julie D. Stopar Craters Images
 
-![](../results/clustering_cnn_20_l2_imgs.png){width=100%}
+![](../results/clustering_cae_20_l2_imgs.png){width=100%}

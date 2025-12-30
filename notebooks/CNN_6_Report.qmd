@@ -6,7 +6,7 @@ format: pdf
 
 # Project Overview
 
-This report summarizes the run of the CNN 6 Latent Variable pipeline, including training results, reconstructions, and clustering.
+This report summarizes the run of the cae 6 Latent Variable pipeline, including training results, reconstructions, and clustering.
 
 
 ## Dataset
@@ -77,12 +77,12 @@ summary(model, (1, 100, 100))
 
 ## Plot Clustering of PCA on Latent Variables: Julie D. Stopar Craters with Labels
 
-![](../results/clustering_cnn_6_dots.png){width=100%}
+![](../results/clustering_cae_6_dots.png){width=100%}
 
 
 ## Plot Clustering of PCA on Latent Variables: Julie D. Stopar Craters Images
 
-![](../results/clustering_cnn_6_imgs.png){width=100%}
+![](../results/clustering_cae_6_imgs.png){width=100%}
 
 
 

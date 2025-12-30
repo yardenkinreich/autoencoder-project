@@ -29,16 +29,23 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    if args.autoencoder_model == 'cnn':
+    if args.autoencoder_model == 'cae':
         # Load data
-        craters = np.load(args.input)
-        craters = craters.astype(np.float32)
-        craters = craters.reshape(-1, 1, 100, 100) # Reshape from flattened to 1x100x100
+        file_size = os.path.getsize(args.input)
+        N = file_size // (224 * 224 * 1 * 4)
+        craters = arr = np.memmap(
+            args.input,
+            dtype=np.float32,
+            mode="r",
+            shape=(N, 1, 224, 224)
+            )
         num_samples = args.num_samples if args.num_samples is not None else len(craters)
         num_samples = min(num_samples, len(craters))
         rng = np.random.default_rng(seed)
         sample_indices = rng.choice(len(craters), size=num_samples, replace=False)
         craters_subset = craters[sample_indices]
+
+        print(f"Data range: min={craters_subset.min()}, max={craters_subset.max()}, mean={craters_subset.mean()}")
 
         dataset = TensorDataset(torch.from_numpy(craters_subset))
 
@@ -58,6 +65,7 @@ def main(args):
         model = ConvAutoencoder(latent_dim=args.latent_dim).to(device)
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
 
         # Training loop
         train_losses = []
@@ -90,7 +98,7 @@ def main(args):
             val_losses.append(epoch_val_loss)
 
             scheduler.step()
-            current_lr = optimizer.get_lr()
+            current_lr = optimizer.param_groups[0]['lr']
 
             print(f"Epoch [{epoch+1}/{args.epochs}] - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}", 
                 f"LR: {current_lr:.2e}")
@@ -109,6 +117,7 @@ def main(args):
         plt.savefig(args.loss_plot)
         plt.close()
 
+        '''
         # Save latent vectors for clustering
         latent_list = []
 
@@ -122,7 +131,7 @@ def main(args):
         os.makedirs(os.path.dirname(args.latent_output), exist_ok=True)
         latent_vectors = np.concatenate(latent_list, axis=0)
         np.save(args.latent_output, latent_vectors)
-
+        '''
 
     elif args.autoencoder_model == 'mae':
         # Load data
@@ -157,9 +166,9 @@ def main(args):
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
         # Load pretrained MAE
-        model = mae_vit_large_patch16()
+        model = mae_vit_base_patch16()
         # Load pretrained weights
-        checkpoint = torch.load("src/models/mae/mae_finetuned_vit_large.pth", map_location="cpu")
+        checkpoint = torch.load("src/models/mae/pretrain_mae_vit_base_full.pth", map_location="cpu")
 
         msg = model.load_state_dict(checkpoint['model'], strict=False)
         print(f"Loaded pretrained MAE weights: {msg}")
@@ -184,11 +193,6 @@ def main(args):
         # data_training augmentations
         train_transforms = T.Compose([
             T.RandomVerticalFlip(p=0.5),
-            T.RandomRotation(degrees=5),
-            T.ColorJitter(
-                brightness=0.2,
-                contrast=0.3,
-            ),
             T.GaussianNoise(mean=0.0, sigma=0.01),
             T.RandomErasing(
                 p=0.2,
@@ -217,7 +221,7 @@ def main(args):
             running_train_loss = 0.0
             for batch in train_loader:
                 imgs = batch[0].to(device)
-                imgs = train_transforms(imgs)
+                #imgs = train_transforms(imgs)
 
                 loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
 
@@ -275,6 +279,8 @@ def main(args):
         plt.savefig(args.loss_plot)
         plt.close()
 
+        # Save latent vectors for clustering
+        '''
         latent_list = []
 
         with torch.no_grad():
@@ -292,16 +298,15 @@ def main(args):
         latent_vectors = np.concatenate(latent_list, axis=0)
         np.save(args.latent_output, latent_vectors)
         print(f"Saved latent vectors of shape {latent_vectors.shape}")
-        
+        '''
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--autoencoder_model', type=str, choices=['cnn', 'mae'], default='cnn', help="Type of autoencoder model to use")
+    parser.add_argument('--autoencoder_model', type=str, choices=['cae', 'mae'], default='cae', help="Type of autoencoder model to use")
     parser.add_argument('--input', required=True, help="Path to crater npy file")
     parser.add_argument('--model_output', required=True, help="Path to save trained model")
     parser.add_argument('--loss_plot', required=True, help="Path to save loss curve plot")
-    parser.add_argument('--latent_output', required=True, help="Path to save latent vectors")
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--latent_dim', type=int, default=6)

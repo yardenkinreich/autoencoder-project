@@ -59,7 +59,7 @@ The goal of this project is to:
 1. Configure run name and toggles
 - Edit the top of the Snakefile:
 ```python
-RUN_NAME = "cnn_latent20_l2_sched"
+RUN_NAME = "cae_latent20_l2_sched"
 RUN_PREPROCESS = True        # Set to False to skip preprocessing
 RUN_DISPLAY = True           # Set to False to skip display step
 TECHNIQUE = "pca"            # Choose dimensionality reduction technique: "pca" or "tsne"

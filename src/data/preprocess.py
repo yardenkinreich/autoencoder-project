@@ -44,39 +44,7 @@ def get_craters_crs():
     return pyproj.CRS.from_wkt(craters_wkt)
 
 
-def process_and_save_crater_crops(filtered_craters, map_file, output_dir, offset, dst_height, dst_width,
-                                   save_crops, save_np_array, output_path):
-    craters_list = []
-    craters_crs = get_craters_crs()
-
-    with rasterio.open(map_file) as map_ref:
-        transformer = pyproj.Transformer.from_crs(craters_crs, map_ref.crs.to_string(), always_xy=True)
-
-        for i, crater in filtered_craters.iterrows():
-            if i % 10000 == 0:
-                print(f"Processed {i} craters")
-            crater_img = crop_crater(
-                map_ref,
-                crater['LAT_CIRC_IMG'],
-                crater['LON_CIRC_IMG'],
-                crater['DIAM_CIRC_IMG'],
-                offset,
-                transformer
-            )
-
-            craters_list.append((crater_img / 255).astype(np.float16))
-
-            if save_crops:
-                filename = os.path.join(output_dir, f"{crater['CRATER_ID']}.jpeg")
-                plt.imsave(filename, crater_img, cmap='gray')
-
-    if save_np_array:
-        craters_array = np.array(craters_list)
-        craters_array = craters_array.reshape(craters_array.shape[0], dst_height * dst_width)
-        print(craters_array.shape, craters_array.dtype)
-        np.save(output_path, craters_array)
-
-def process_and_save_crater_crops_mae(
+def process_and_save_crater_crops(
     filtered_craters,
     map_file,
     output_dir,
@@ -84,75 +52,92 @@ def process_and_save_crater_crops_mae(
     save_raw_crops=True,
     save_np_array=True,
     output_path=None,
-    batch_size=64,
-    autoencoder_model="mae"
+    target_size=224,  # Final size for both CAE and MAE
+    num_channels=3    # 3 for RGB (MAE), 1 for grayscale (CAE)
 ):
+    """
+    Unified preprocessing pipeline for both CAE and MAE:
+    1. Crop crater from map with offset
+    2. Resize to 256x256
+    3. Center crop to 224x224
+    4. Convert to target channels (1 for CAE, 3 for MAE)
+    5. Compute dataset statistics (mean, std)
+    6. Normalize using dataset statistics
+    7. Save individual crops and numpy array
+    """
     os.makedirs(output_dir, exist_ok=True)
-
+    
     craters_crs = get_craters_crs()
     N = len(filtered_craters)
-
-    # === Step 1: First pass - collect all images in [0, 1] range ===
-    mae_transform_no_norm = transforms.Compose([
+    
+    # Transform pipeline (no normalization yet)
+    transform_no_norm = transforms.Compose([
         transforms.Resize(256, interpolation=Image.BICUBIC),
-        transforms.CenterCrop(224),
-        transforms.ToTensor()  # Just converts to [0, 1]
+        transforms.CenterCrop(target_size),
+        transforms.ToTensor()  # Converts to [0, 1]
     ])
-
+    
+    # Create temporary memmap for storing unnormalized data
     temp_memmap = None
     if save_np_array and output_path is not None:
+        temp_shape = (N, num_channels, target_size, target_size)
         temp_memmap = np.memmap(
-            output_path + ".temp", dtype=np.float32, mode="w+", shape=(N, 3, 224, 224)
+            output_path + ".temp", dtype=np.float32, mode="w+", shape=temp_shape
         )
     
-    print("=== PASS 1: Loading images ===")
+    print(f"=== PASS 1: Loading and cropping {N} craters ===")
+    print(f"Target size: {target_size}x{target_size}, Channels: {num_channels}")
     
     with rasterio.open(map_file) as map_ref:
         transformer = pyproj.Transformer.from_crs(
             craters_crs, map_ref.crs.to_string(), always_xy=True
         )
-
+        
         for i, (_, crater) in enumerate(filtered_craters.iterrows()):
             if i % 10000 == 0:
                 print(f"Processed {i}/{N}")
-
+            
+            # Crop crater from map
             crater_img = crop_crater(
                 map_ref,
                 crater["LAT_CIRC_IMG"],
                 crater["LON_CIRC_IMG"],
                 crater["DIAM_CIRC_IMG"],
                 offset,
-                transformer,
-                autoencoder_model
+                transformer
             )
-
-            if crater_img.ndim == 2:
-                crater_img = np.stack([crater_img] * 3, axis=-1)
             
-            if save_raw_crops:
-                crater_id = crater["CRATER_ID"]
-                np.save(os.path.join(output_dir, f"{crater_id}.npy"), crater_img)
-
+            # Ensure proper dimensions
+            if crater_img.ndim == 2:
+                crater_img = np.stack([crater_img] * 3, axis=-1)  # Convert grayscale to RGB
+            
+            # Convert to PIL and apply transforms
             pil_img = Image.fromarray(crater_img.astype(np.uint8), mode="RGB")
-            tensor_img = mae_transform_no_norm(pil_img)
-
+            tensor_img = transform_no_norm(pil_img)  # Shape: (3, 224, 224), range [0, 1]
+            
+            # Convert to target number of channels
+            if num_channels == 1:
+                # Convert RGB to grayscale for CAE
+                tensor_img = tensor_img.mean(dim=0, keepdim=True)  # Shape: (1, 224, 224)
+            
+            # Store in temporary memmap
             if temp_memmap is not None:
                 temp_memmap[i] = tensor_img.numpy()
-
+    
     if temp_memmap is None:
         print("Error: temp_memmap is None")
         return
     
     temp_memmap.flush()
     
-    # === Step 2: Compute dataset mean and std ===
-    print("\n=== Computing dataset statistics ===")
+    # === Step 2: Compute dataset statistics ===
+    print("\n=== PASS 2: Computing dataset statistics ===")
     
     chunk_size = 1000
     
-    # STEP 2A: Compute overall mean
+    # Compute mean
     print("Computing mean...")
-    sum_pixels = np.zeros(3, dtype=np.float64)
+    sum_pixels = np.zeros(num_channels, dtype=np.float64)
     total_pixels = 0
     
     for start_idx in range(0, N, chunk_size):
@@ -163,36 +148,38 @@ def process_and_save_crater_crops_mae(
     
     dataset_mean = sum_pixels / total_pixels
     
-    # STEP 2B: Compute overall std using the mean
+    # Compute std
     print("Computing std...")
-    sum_squared_diff = np.zeros(3, dtype=np.float64)
+    sum_squared_diff = np.zeros(num_channels, dtype=np.float64)
     
     for start_idx in range(0, N, chunk_size):
         end_idx = min(start_idx + chunk_size, N)
         chunk = temp_memmap[start_idx:end_idx]
         
-        for c in range(3):
+        for c in range(num_channels):
             diff = chunk[:, c, :, :] - dataset_mean[c]
             sum_squared_diff[c] += (diff ** 2).sum()
     
     dataset_std = np.sqrt(sum_squared_diff / total_pixels)
     
-    print(f"\n=== DATASET STATISTICS (CORRECT) ===")
-    print(f"Mean per channel (R, G, B): {dataset_mean}")
-    print(f"Std per channel (R, G, B): {dataset_std}")
-    print(f"Total pixels used: {total_pixels:,}")
+    print(f"\n=== DATASET STATISTICS ===")
+    print(f"Mean per channel: {dataset_mean}")
+    print(f"Std per channel: {dataset_std}")
+    print(f"Total pixels: {total_pixels:,}")
     
-    # Sanity check
+    # Sanity checks
     if np.any(dataset_std < 0.01):
-        print("⚠️  WARNING: Very low std detected. Craters might be too similar.")
+        print("⚠️  WARNING: Very low std detected.")
     if np.any(dataset_std > 0.5):
-        print("⚠️  WARNING: Very high std detected. Might have outliers.")
+        print("⚠️  WARNING: Very high std detected.")
     
-    # === Step 3: Second pass - apply dataset normalization ===
-    print("\n=== PASS 2: Applying dataset normalization ===")
+    # === Step 3: Apply normalization and save ===
+    print("\n=== PASS 3: Normalizing and saving ===")
     
+    # Create final memmap for normalized data
     crater_memmap = np.memmap(
-        output_path, dtype=np.float32, mode="w+", shape=(N, 3, 224, 224)
+        output_path, dtype=np.float32, mode="w+", 
+        shape=(N, num_channels, target_size, target_size)
     )
     
     for start_idx in range(0, N, chunk_size):
@@ -200,13 +187,32 @@ def process_and_save_crater_crops_mae(
             print(f"Normalizing {start_idx}/{N}")
         
         end_idx = min(start_idx + chunk_size, N)
-        chunk = temp_memmap[start_idx:end_idx].copy()  # Make a copy
+        chunk = temp_memmap[start_idx:end_idx].copy()
+        
+        # Debug: print before normalization
+        if start_idx == 0:
+            print(f"  Before normalization - chunk mean: {chunk.mean():.6f}, std: {chunk.std():.6f}")
         
         # Apply normalization: (x - mean) / std
-        for c in range(3):
+        '''
+        for c in range(num_channels):
             chunk[:, c, :, :] = (chunk[:, c, :, :] - dataset_mean[c]) / (dataset_std[c] + 1e-8)
+            '''
         
+        # Debug: print after normalization
+        if start_idx == 0:
+            print(f"  After normalization - chunk mean: {chunk.mean():.6f}, std: {chunk.std():.6f}")
+        
+        # Write normalized data to memmap
         crater_memmap[start_idx:end_idx] = chunk
+        
+        # Save individual normalized crops if requested
+        if save_raw_crops:
+            for local_idx in range(end_idx - start_idx):
+                global_idx = start_idx + local_idx
+                crater_id = filtered_craters.iloc[global_idx]["CRATER_ID"]
+                crop_data = chunk[local_idx]  # Shape: (C, H, W), already normalized
+                np.save(os.path.join(output_dir, f"{crater_id}.npy"), crop_data)
     
     crater_memmap.flush()
     
@@ -216,29 +222,39 @@ def process_and_save_crater_crops_mae(
     
     print(f"\n✅ Finished processing {N} craters. Data saved to {output_path}")
     
-    # === FINAL DIAGNOSTIC ===
-    print("\n=== FINAL NORMALIZED DATASET STATISTICS ===")
-    sample_size = min(1000, N)
-    sample_data = crater_memmap[:sample_size]
-    print(f"Sample size: {sample_size}")
-    print(f"Overall range: [{sample_data.min():.4f}, {sample_data.max():.4f}]")
-    print(f"Overall mean: {sample_data.mean():.4f} (should be ~0)")
-    print(f"Overall std: {sample_data.std():.4f} (should be ~1)")
-    print(f"Per-channel means: {sample_data.mean(axis=(0,2,3))} (should be ~[0, 0, 0])")
-    print(f"Per-channel stds: {sample_data.std(axis=(0,2,3))} (should be ~[1, 1, 1])")
+    # === Validation - reload from disk to verify ===
+    print("\n=== VALIDATION: Normalized dataset statistics ===")
     
-    # Check for outliers
+    # IMPORTANT: Reload the memmap from disk to ensure we're reading what was actually saved
+    del crater_memmap  # Close the write memmap
+    
+    # Open read-only for validation
+    validation_memmap = np.memmap(
+        output_path, dtype=np.float32, mode='r',
+        shape=(N, num_channels, target_size, target_size)
+    )
+    
+    sample_size = min(1000, N)
+    sample_data = validation_memmap[:sample_size]
+    print(f"Sample size: {sample_size}")
+    print(f"Range: [{sample_data.min():.4f}, {sample_data.max():.4f}]")
+    print(f"Mean: {sample_data.mean():.4f} (should be ~0)")
+    print(f"Std: {sample_data.std():.4f} (should be ~1)")
+    print(f"Per-channel means: {sample_data.mean(axis=(0,2,3))} (should be ~0)")
+    print(f"Per-channel stds: {sample_data.std(axis=(0,2,3))} (should be ~1)")
+    
+    # Outlier check
     print(f"\n=== OUTLIER CHECK ===")
     print(f"Values < -3: {(sample_data < -3).sum()} pixels")
     print(f"Values > 3: {(sample_data > 3).sum()} pixels")
     print(f"99th percentile: {np.percentile(sample_data, 99):.4f}")
     print(f"1st percentile: {np.percentile(sample_data, 1):.4f}")
     
-    # Save statistics for later use
+    # Save statistics
     stats_path = output_path.replace('.dat', '_stats.npz')
     np.savez(stats_path, mean=dataset_mean, std=dataset_std)
     print(f"\nSaved normalization statistics to {stats_path}")
-  
+
 
 def save_crater_metadata(filtered_craters, map_file, output_path):
     craters_crs = get_craters_crs()
@@ -278,6 +294,22 @@ def save_crater_metadata(filtered_craters, map_file, output_path):
                 df.to_csv(output_path, index=False)
 
 
+# Example usage:
+# For MAE (RGB):
+# process_and_save_crater_crops_unified(
+#     filtered_craters, map_file, output_dir, offset,
+#     save_raw_crops=True, save_np_array=True, output_path="mae_craters.dat",
+#     target_size=224, num_channels=3
+# )
+
+# For CAE (Grayscale):
+# process_and_save_crater_crops_unified(
+#     filtered_craters, map_file, output_dir, offset,
+#     save_raw_crops=True, save_np_array=True, output_path="cae_craters.dat",
+#     target_size=224, num_channels=1
+# )
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
@@ -293,11 +325,9 @@ if __name__ == '__main__':
     parser.add_argument('--craters_to_output', type=int, default=-1)
     parser.add_argument('--save_raw_crops', action='store_true')
     parser.add_argument('--save_np_array', action='store_true')
-    parser.add_argument('--dst_height', type=int, default=100)
-    parser.add_argument('--dst_width', type=int, default=100)
-    parser.add_argument('--autoencoder_model', type=str, choices=['cnn', 'mae'], default='cnn')
+    parser.add_argument('--target_size', type=int, default=224)
+    parser.add_argument('--autoencoder_model', type=str, choices=['cae', 'mae'], default='cae')
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -309,20 +339,11 @@ if __name__ == '__main__':
         args.latitude_bounds,
         args.craters_to_output
     )
-    if args.autoencoder_model == 'cnn':
+
+    print(f"Filtered {len(filtered)} craters")
+
+    if args.autoencoder_model == 'cae':
         process_and_save_crater_crops(
-            filtered,
-            args.map_file,
-            args.output_dir,
-            args.offset,
-            args.dst_height,
-            args.dst_width,
-            args.save_crops,
-            args.save_np_array,
-            args.np_output_path
-        )
-    elif args.autoencoder_model == 'mae':   
-        process_and_save_crater_crops_mae(
             filtered,
             args.map_file,
             args.output_dir,
@@ -330,12 +351,26 @@ if __name__ == '__main__':
             save_raw_crops=args.save_raw_crops,
             save_np_array=args.save_np_array,
             output_path=args.np_output_path,
-            batch_size=args.batch_size,
-            autoencoder_model=args.autoencoder_model
+            target_size=args.target_size,
+            num_channels=1
         )
+            # Save crater metadata
+        save_crater_metadata(filtered, args.map_file, args.info_output_path)
+    
+        print("Processing complete!")
 
-    save_crater_metadata(
-        filtered,
-        args.map_file,
-        args.info_output_path
-    )
+    elif args.autoencoder_model == 'mae':   
+        process_and_save_crater_crops(
+            filtered,
+            args.map_file,
+            args.output_dir,
+            args.offset,
+            save_raw_crops=args.save_raw_crops,
+            save_np_array=args.save_np_array,
+            output_path=args.np_output_path,
+            target_size=args.target_size,
+            num_channels=3
+        )
+        
+        save_crater_metadata(filtered, args.map_file, args.info_output_path)
+        print("Processing complete!")

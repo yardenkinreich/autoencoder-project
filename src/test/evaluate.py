@@ -151,59 +151,335 @@ def evaluate_model_edge_cases():
     pass
 
 
-def compare_clusters(technique, cluster_method, num_clusters, use_gpu, out_dir):
-    """Compare your clustering results to Julie's ground truth clusters."""
-
-    print("--- Running Cluster Comparison ---")
+def compare_clusters(technique, cluster_method, n_clusters, use_gpu, out_dir):
+    """
+    Comprehensive clustering evaluation with structural similarity metrics.
+    """
     
-    # Load latent representations and ground-truth labels
-    latents = np.load(os.path.join(out_dir, "latents_julie_with_flip.npy"))  # your latent vectors
-    states = np.load(os.path.join(out_dir, "states_julie_with_flip.npy"))     # ground truth labels (1–4)
-
-    # Run clustering (returns predicted cluster labels)
-    fig_reg, emb, labels = cluster_and_plot(
+    print("=" * 60)
+    print("CLUSTERING EVALUATION ON HELD-OUT TEST SET")
+    print("=" * 60)
+    
+    # Load data
+    latents = np.load(os.path.join(out_dir, "latents.npy"))
+    states = np.load(os.path.join(out_dir, "states.npy")).squeeze()
+    
+    STATE_LABELS = {
+        1: "New Crater",
+        2: "Semi New Crater",
+        3: "Semi Old Crater",
+        4: "Old Crater"
+    }
+    STATE_COLORS = {
+        1: "tab:blue",
+        2: "tab:green",
+        3: "tab:orange",
+        4: "tab:red"
+    }
+    
+    # Clustering
+    fig_reg, fig_gt, emb, labels = cluster_and_plot(
         latent=latents,
         technique=technique,
-        n_clusters=num_clusters,
+        n_clusters=n_clusters,
         save_path=out_dir,
         use_gpu=use_gpu,
         cluster_method=cluster_method,
-        imgs_dir="data/raw/craters_for_danny"
+        imgs_dir="data/raw/craters_for_danny",
+        ground_truth_labels=states,
+        state_labels=STATE_LABELS,
+        state_colors=STATE_COLORS
     )
     
-    # Save the figures
-    fig_reg.savefig(os.path.join(out_dir, "cluster_regular.png"))
-
-    # Compute similarity metrics (labels vs ground truth)
+    # Standard metrics
     ari = adjusted_rand_score(states, labels)
     nmi = normalized_mutual_info_score(states, labels)
-    fmi = fowlkes_mallows_score(states, labels)
+    
+    print("\n" + "=" * 60)
+    print("STANDARD CLUSTERING METRICS")
+    print("=" * 60)
+    print(f"ARI: {ari:.3f} | NMI: {nmi:.3f}")
+    
+    # NEW: Structural similarity metrics
+    geometry_results = compare_cluster_geometry(emb, labels, states, n_clusters)
+    quality_results = evaluate_cluster_structure(labels, states)
+    internal_results = internal_cluster_quality(emb, labels, states)
+    
+    # NEW: Continuum evidence
+    overlap_results = analyze_distribution_overlap(emb, labels, states, n_clusters)
+    boundary_results = analyze_boundary_uncertainty(emb, states, STATE_LABELS)
+    
+    # Compile all results
+    results = {
+        'standard_metrics': {
+            'ari': ari,
+            'nmi': nmi,
+        },
+        'structural_similarity': {
+            **geometry_results,
+            **quality_results,
+            **internal_results
+        },
+        'continuum_evidence': {
+            'distribution_overlaps': overlap_results,
+            'boundary_uncertainty': boundary_results['mean_entropy'],
+            'uncertain_sample_pct': np.sum(boundary_results['uncertain_samples'])/len(states)*100
+        }
+    }
+    
+    # Save
+    import json
+    with open(os.path.join(out_dir, 'comprehensive_results.json'), 'w') as f:
+        json.dump({k: v for k, v in results.items() if k != 'continuum_evidence'}, 
+                  f, indent=2, default=str)
+    
+    return results
 
-
-
-    ct = pd.crosstab(states, labels)
-    ct_norm = ct.div(ct.sum(axis=1), axis=0)
-    print(ct)
-    print(ct_norm)
-
+def compare_cluster_geometry(embedding, predicted_labels, ground_truth, n_clusters=4):
+    """
+    Compare geometric arrangement of predicted vs. ground truth clusters.
+    Uses Procrustes analysis to measure structural similarity.
+    """
+    from scipy.spatial import procrustes
+    from scipy.spatial.distance import cdist
+    
+    # Compute centroids for predicted clusters
+    pred_centroids = np.array([
+        embedding[predicted_labels == i].mean(axis=0) 
+        for i in range(n_clusters)
+    ])
+    
+    # Compute centroids for ground truth
+    gt_centroids = np.array([
+        embedding[ground_truth == state].mean(axis=0)
+        for state in sorted(np.unique(ground_truth))
+    ])
+    
+    # Procrustes analysis: measure shape similarity
+    mtx1, mtx2, disparity = procrustes(pred_centroids, gt_centroids)
+    
+    print(f"\n{'='*60}")
+    print("CLUSTER GEOMETRY COMPARISON")
+    print(f"{'='*60}")
+    print(f"Procrustes disparity: {disparity:.4f}")
+    print("(Lower = more similar geometric arrangement, 0 = identical)")
+    
+    # Pairwise distances between centroids
+    pred_dist_matrix = cdist(pred_centroids, pred_centroids, metric='euclidean')
+    gt_dist_matrix = cdist(gt_centroids, gt_centroids, metric='euclidean')
+    
+    # Correlation of distance matrices (Mantel-like test)
     from scipy.stats import spearmanr
-    spearmanr(labels, states)
+    
+    # Flatten upper triangular (avoid diagonal and duplicates)
+    pred_dists = pred_dist_matrix[np.triu_indices(n_clusters, k=1)]
+    gt_dists = gt_dist_matrix[np.triu_indices(n_clusters, k=1)]
+    
+    corr, pval = spearmanr(pred_dists, gt_dists)
+    
+    print(f"\nInter-cluster distance correlation: {corr:.3f} (p={pval:.4f})")
+    print("(Measures if relative cluster spacing is preserved)")
+    
+    return {
+        'procrustes_disparity': disparity,
+        'distance_correlation': corr,
+        'distance_correlation_pvalue': pval,
+        'pred_centroids': pred_centroids,
+        'gt_centroids': gt_centroids
+    }
 
-    print(f"\nCluster similarity with Julie's ground truth:")
-    print(f"Adjusted Rand Index (ARI): {ari:.3f}")
-    print(f"Normalized Mutual Information (NMI): {nmi:.3f}")
-    print(f"Fowlkes–Mallows Index (FMI): {fmi:.3f}")
+from sklearn.metrics import homogeneity_score, completeness_score, v_measure_score
 
-    # Save results
-    os.makedirs(out_dir, exist_ok=True)  # ✓ Create the directory
-    metrics_file = os.path.join(out_dir, "cluster_metrics.csv")  # ✓ File path
-    with open(metrics_file, "w") as f:
-        f.write("metric,value\n")
-        f.write(f"ARI,{ari:.4f}\n")
-        f.write(f"NMI,{nmi:.4f}\n")
-        f.write(f"FMI,{fmi:.4f}\n")
+def evaluate_cluster_structure(predicted_labels, ground_truth):
+    """
+    Evaluate clustering quality with metrics less sensitive to label noise.
+    """
+    homogeneity = homogeneity_score(ground_truth, predicted_labels)
+    completeness = completeness_score(ground_truth, predicted_labels)
+    v_measure = v_measure_score(ground_truth, predicted_labels)
+    
+    print(f"\n{'='*60}")
+    print("CLUSTER QUALITY METRICS")
+    print(f"{'='*60}")
+    print(f"Homogeneity: {homogeneity:.3f}")
+    print("  → Each cluster contains only members of a single class")
+    print(f"Completeness: {completeness:.3f}")
+    print("  → All members of a class are assigned to the same cluster")
+    print(f"V-Measure: {v_measure:.3f}")
+    print("  → Harmonic mean (balanced measure)")
+    
+    return {
+        'homogeneity': homogeneity,
+        'completeness': completeness,
+        'v_measure': v_measure
+    }
 
-    print(f"\nSaved metrics to {metrics_file}")
+from sklearn.metrics import silhouette_score, silhouette_samples
+
+def internal_cluster_quality(embedding, predicted_labels, ground_truth):
+    """
+    Compare internal cluster quality metrics.
+    High scores suggest well-separated clusters regardless of labels.
+    """
+
+    STATE_LABELS = {
+            1: "New Crater",
+            2: "Semi New Crater",
+            3: "Semi Old Crater",
+            4: "Old Crater"
+        }
+
+    # Silhouette for predicted clusters
+    pred_silhouette = silhouette_score(embedding, predicted_labels)
+    
+    # Silhouette for ground truth (as if it were clustering)
+    gt_silhouette = silhouette_score(embedding, ground_truth)
+    
+    print(f"\n{'='*60}")
+    print("INTERNAL CLUSTER QUALITY (Silhouette Score)")
+    print(f"{'='*60}")
+    print(f"Predicted clusters: {pred_silhouette:.3f}")
+    print(f"Ground truth labels: {gt_silhouette:.3f}")
+    print(f"Difference: {abs(pred_silhouette - gt_silhouette):.3f}")
+    print("\nInterpretation:")
+    if abs(pred_silhouette - gt_silhouette) < 0.1:
+        print("  ✓ Similar internal structure (clusters are comparably separated)")
+    else:
+        print(f"  → Predicted clustering is {'better' if pred_silhouette > gt_silhouette else 'worse'} separated")
+    
+    # Per-cluster silhouette
+    pred_silhouettes = silhouette_samples(embedding, predicted_labels)
+    gt_silhouettes = silhouette_samples(embedding, ground_truth)
+    
+    print("\nPer-cluster average silhouette:")
+    print("Predicted clusters:")
+    for i in range(len(np.unique(predicted_labels))):
+        mask = predicted_labels == i
+        print(f"  Cluster {i}: {pred_silhouettes[mask].mean():.3f}")
+    
+    print("Ground truth labels:")
+    for state in sorted(np.unique(ground_truth)):
+        mask = ground_truth == state
+        label = STATE_LABELS.get(state, f"State {state}")
+        print(f"  {label}: {gt_silhouettes[mask].mean():.3f}")
+    
+    return {
+        'pred_silhouette': pred_silhouette,
+        'gt_silhouette': gt_silhouette,
+        'silhouette_difference': abs(pred_silhouette - gt_silhouette)
+    }
+
+def analyze_distribution_overlap(embedding, predicted_labels, ground_truth, n_clusters=4):
+    """
+    Analyze overlap between predicted and ground truth distributions.
+    High overlap supports the "continuum" argument.
+    """
+
+    STATE_LABELS = {
+        1: "New Crater",
+        2: "Semi New Crater",
+        3: "Semi Old Crater",
+        4: "Old Crater"
+    }
+
+    
+    from scipy.spatial.distance import jensenshannon
+    from sklearn.neighbors import KernelDensity
+    
+    print(f"\n{'='*60}")
+    print("DISTRIBUTION OVERLAP ANALYSIS")
+    print(f"{'='*60}")
+    
+    # For each ground truth class, compute overlap with predicted clusters
+    overlaps = []
+    
+    for state in sorted(np.unique(ground_truth)):
+        gt_mask = ground_truth == state
+        gt_points = embedding[gt_mask]
+        
+        # Which clusters contain this ground truth class?
+        cluster_distribution = []
+        for cluster in range(n_clusters):
+            cluster_mask = predicted_labels == cluster
+            overlap_count = np.sum(gt_mask & cluster_mask)
+            cluster_distribution.append(overlap_count)
+        
+        cluster_distribution = np.array(cluster_distribution) / np.sum(cluster_distribution)
+        
+        # Entropy of distribution (high = spread across clusters = continuum)
+        from scipy.stats import entropy
+        overlap_entropy = entropy(cluster_distribution)
+        
+        label = STATE_LABELS.get(state, f"State {state}")
+        print(f"\n{label}:")
+        print(f"  Distribution across clusters: {cluster_distribution.round(3)}")
+        print(f"  Entropy: {overlap_entropy:.3f} (max={np.log(n_clusters):.3f})")
+        
+        if overlap_entropy > 0.5:
+            print(f"  → High entropy: spans multiple clusters (supports continuum)")
+        
+        overlaps.append({
+            'state': state,
+            'label': label,
+            'distribution': cluster_distribution,
+            'entropy': overlap_entropy
+        })
+    
+    return overlaps
+
+def analyze_boundary_uncertainty(embedding, ground_truth, state_labels):
+    """
+    Analyze uncertainty at boundaries between degradation states.
+    Points near decision boundaries suggest continuum rather than discrete states.
+    """
+    from sklearn.svm import SVC
+    from sklearn.model_selection import cross_val_predict
+    
+    print(f"\n{'='*60}")
+    print("DECISION BOUNDARY ANALYSIS")
+    print(f"{'='*60}")
+    
+    # Train classifier to learn ground truth boundaries
+    clf = SVC(kernel='rbf', probability=True, random_state=42)
+    
+    # Cross-validated predictions with probabilities
+    pred_proba = cross_val_predict(clf, embedding, ground_truth, 
+                                    cv=5, method='predict_proba')
+    
+    # Entropy of predictions (high = uncertain classification)
+    from scipy.stats import entropy
+    prediction_entropy = entropy(pred_proba, axis=1)
+    
+    # For each ground truth class, find samples with high uncertainty
+    print("\nClassification confidence by ground truth state:")
+    for state in sorted(np.unique(ground_truth)):
+        mask = ground_truth == state
+        state_entropy = prediction_entropy[mask]
+        
+        max_prob = pred_proba[mask].max(axis=1)
+        uncertain_pct = np.sum(max_prob < 0.6) / len(max_prob) * 100
+        
+        label = state_labels.get(state, f"State {state}")
+        print(f"\n{label}:")
+        print(f"  Mean prediction entropy: {state_entropy.mean():.3f}")
+        print(f"  Samples with <60% confidence: {uncertain_pct:.1f}%")
+        
+        if uncertain_pct > 30:
+            print(f"  → High uncertainty: boundaries are ambiguous")
+    
+    # Overall boundary ambiguity
+    high_uncertainty_mask = prediction_entropy > np.percentile(prediction_entropy, 75)
+    
+    print(f"\n{'='*60}")
+    print(f"Overall: {np.sum(high_uncertainty_mask)} samples ({np.sum(high_uncertainty_mask)/len(ground_truth)*100:.1f}%) ")
+    print(f"have high classification uncertainty (top 25%)")
+    print("This suggests substantial ambiguity in manual category boundaries.")
+    
+    return {
+        'prediction_entropy': prediction_entropy,
+        'uncertain_samples': high_uncertainty_mask,
+        'mean_entropy': prediction_entropy.mean()
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -219,7 +495,7 @@ if __name__ == "__main__":
 
     # Model Cluster Comparison
     cluster_parser = subparsers.add_parser("cluster_compare",help="Tool for image preprocessing verification and model latent space evaluation.")
-    cluster_parser.add_argument("--num_clusters", type=int, default=4, help="Number of clusters (should match ground truth states)")
+    cluster_parser.add_argument("--n_clusters", type=int, default=4, help="Number of clusters (should match ground truth states)")
     cluster_parser.add_argument("--out_df", type=str, default="", help="Path to save output CSV with clustering metrics. Required to run cluster comparison.")
     cluster_parser.add_argument("--cluster_method", type=str, choices=["kmeans", "gmm"], default="kmeans", help="Clustering algorithm to use.")
     cluster_parser.add_argument("--technique", type=str, choices=["pca", "tsne"], default="pca", help="Dimensionality reduction technique for visualization.")
@@ -249,7 +525,7 @@ if __name__ == "__main__":
         compare_clusters(
             technique=args.technique,
             cluster_method=args.cluster_method,
-            num_clusters=args.num_clusters,
+            n_clusters=args.n_clusters,
             use_gpu=args.use_gpu,
             out_df=args.out_df
         )

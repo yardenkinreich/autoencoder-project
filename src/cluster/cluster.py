@@ -55,18 +55,24 @@ def load_images(imgs_dir):
     files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
     states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
 
-    if args.autoencoder_model == 'cnn':
-        transform = transforms.Compose([
-            transforms.Resize((100, 100)),
-            transforms.ToTensor()
-        ])
-        
-        imgs = torch.stack([
-            transform(Image.fromarray(
-                flip_crater(np.array(Image.open(os.path.join(imgs_dir, f)).convert("L")))
-            ))
-            for f in files
-        ]).float()
+    if args.autoencoder_model == 'cae':
+        imgs_list = []
+        for f in files:
+            img_path = os.path.join(imgs_dir, f)
+            
+            # Load grayscale image
+            img = Image.open(img_path).convert("L")
+            img = img.resize((224, 224))
+            img_array = np.array(img, dtype=np.float32) / 255.0
+            
+            # Apply flip_crater
+            img_array = flip_crater(img_array).copy()
+
+            # Convert to tensor and add channel dimension
+            imgs_list.append(torch.from_numpy(img_array).unsqueeze(0))  # shape (1, 224, 224)
+                
+        # Stack all images into a single tensor
+        imgs = torch.stack(imgs_list).float()  # shape (N, 1, 224, 224)
 
     elif args.autoencoder_model == 'mae':
         imgs_list = []
@@ -83,14 +89,14 @@ def load_images(imgs_dir):
             
             # Replicate to 3 channels
             img_3ch = np.stack([img_array, img_array, img_array], axis=0)  # (3, 224, 224)
-            
+            '''
             # Normalize with crater dataset statistics
             mean = np.array([0.27261323, 0.27261323, 0.27261323]).reshape(3, 1, 1)
             std = np.array([0.0973839, 0.0973839, 0.0973839]).reshape(3, 1, 1)
             
-            img_normalized = (img_3ch - mean) / std
-            
-            imgs_list.append(torch.from_numpy(img_normalized))
+            img_3ch = (img_3ch - mean) / std
+            '''
+            imgs_list.append(torch.from_numpy(img_3ch))
                 
         imgs = torch.stack(imgs_list).float()
     
@@ -101,7 +107,7 @@ def load_images(imgs_dir):
 def encode_images(inputs, model_path, bottleneck, device, out_latents, 
 out_states, states = None,mask_ratio=0.75, freeze_until=-2,autoencoder_model="mae", pretrained_model='facebook/vit-mae-large',is_dataloader=False):
 
-    if autoencoder_model == 'cnn':
+    if autoencoder_model == 'cae':
         model = ConvAutoencoder(latent_dim=bottleneck)
         model.load_state_dict(torch.load(model_path, map_location=device))
         encoder = model.encoder.to(device).eval()
@@ -116,7 +122,7 @@ out_states, states = None,mask_ratio=0.75, freeze_until=-2,autoencoder_model="ma
     
     elif autoencoder_model == 'mae':
         # Load pretrained MAE
-        model = mae_vit_large_patch16()
+        model = mae_vit_base_patch16()
 
         try:
             state_dict = torch.load(model_path, map_location="cpu")
@@ -161,27 +167,37 @@ def plot_dots(latents_path, states_path, out_png, technique, model_name):
     states = np.load(states_path).squeeze()
 
     if technique == "pca":
-        coords = PCA(n_components=2).fit_transform(latents)
-        x_axis, y_axis = coords[:, 0], coords[:, 1]
-        x_label, y_label = "PCA Component 1", "PCA Component 2"
+        pca = PCA(n_components=2)
+        coords = pca.fit_transform(latents)
 
-        # Create polar subplot for PCA
+        x_axis, y_axis = coords[:, 0], coords[:, 1]
+
+        explained_var = pca.explained_variance_ratio_
+        x_label = f"PC1 ({explained_var[0]*100:.1f}% variance)"
+        y_label = f"PC2 ({explained_var[1]*100:.1f}% variance)"
+
+        total_var = explained_var.sum() * 100
+        print(f"[PCA] Total variance explained (PC1+PC2): {total_var:.2f}%")
+
         fig, ax = plt.subplots(figsize=(10, 7))
 
     elif technique == "tsne":
         coords = TSNE(n_components=2).fit_transform(latents)
         x_axis, y_axis = coords[:, 0], coords[:, 1]
-        x_label, y_label = "t-SNE Component 1", "t-SNE Component 2"
-        
-        # Create standard Cartesian subplot for t-SNE
+
+        x_label = "t-SNE Component 1"
+        y_label = "t-SNE Component 2"
+
         fig, ax = plt.subplots(figsize=(10, 7))
 
     else:
         raise ValueError(f"Unknown technique {technique}")
 
-    ax.set_title(f"{technique.upper()} on {model_name} Latent Clustering with Known Labels")
-    
-    # Only set labels for Cartesian plots (polar plots handle labels differently)
+    ax.set_title(
+        f"{technique.upper()} Projection of Latent Space "
+        f"Colored by Ground-Truth Deformation State"
+    )
+
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
 
@@ -203,7 +219,6 @@ def plot_dots(latents_path, states_path, out_png, technique, model_name):
     print(f"Saving plot to {out_png}")
     fig.savefig(out_png, dpi=200)
     plt.close(fig)
-
 
 
 def plot_imgs(latents_path, imgs_dir, out_png, technique, model_name):
@@ -240,7 +255,7 @@ if __name__ == "__main__":
     enc = subparsers.add_parser("encode")
     enc.add_argument("--imgs-dir", required=True)
     enc.add_argument("--model", required=True)
-    enc.add_argument("--autoencoder-model", choices=["cnn", "mae"], default="cnn", required=True)
+    enc.add_argument("--autoencoder-model", choices=["cae", "mae"], default="cae", required=True)
     enc.add_argument("--bottleneck", type=int, default=6)
     enc.add_argument("--out-latents", required=True)
     enc.add_argument("--out-states", required=True)

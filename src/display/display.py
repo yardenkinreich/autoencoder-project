@@ -27,7 +27,7 @@ def main(args):# --- Arguments ---
     # --- Load model ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if args.autoencoder_model == "cnn":
+    if args.autoencoder_model == "cae":
         craters = np.load(args.dataset_path).astype(np.float32)
         model = ConvAutoencoder(latent_dim=args.latent_dim)
         model.load_state_dict(torch.load(args.model_path, map_location=device))
@@ -118,7 +118,7 @@ def main(args):# --- Arguments ---
 #arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, required=True, help="Path to trained autoencoder")
-parser.add_argument("--autoencoder_model", type=str, choices=["cnn", "mae"], default="cnn", help="Type of autoencoder model")
+parser.add_argument("--autoencoder_model", type=str, choices=["cae", "mae"], default="cae", help="Type of autoencoder model")
 parser.add_argument("--dataset_path", type=str, required=True, help="Path to craters.npy dataset")
 parser.add_argument("--metadata_path", type=str, required=True, help="CSV with crater coordinates")
 parser.add_argument("--num_clusters", type=int, default=5, help="Number of clusters")
@@ -134,7 +134,7 @@ parser.add_argument("--freeze_until", type=int, default=-2, help="For MAE: numbe
 parser.add_argument("--use_gpu", action="store_true", help="Use GPU for computations if available")
 parser.add_argument("--pretrained_model", type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
 parser.add_argument("--mask_ratio", type=float, default=0.75, help="Mask ratio for MAE")
-parser.add_argument("--bottleneck", type=int, default=6, help="Bottleneck size for CNN autoencoder")
+parser.add_argument("--bottleneck", type=int, default=6, help="Bottleneck size for cae autoencoder")
 args = parser.parse_args()
 main(args)
     

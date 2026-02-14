@@ -6,8 +6,8 @@ __pycache__/
 
 results/
 data/
-data/raw
 data/processed/
+data/processed_filter
 data/test_processing/test_craters.npy
 .DS_Store
 .vscode/

@@ -28,16 +28,23 @@ def main(args):# --- Arguments ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     if args.autoencoder_model == "cae":
-        craters = np.load(args.dataset_path).astype(np.float32)
+        # Load data
+        file_size = os.path.getsize(args.dataset_path)
+        N = file_size // (224 * 224 * 1 * 4)
+        craters = arr = np.memmap(
+            args.dataset_path,
+            dtype=np.float32,
+            mode="r",
+            shape=(N, 1, 224, 224)
+            )
         model = ConvAutoencoder(latent_dim=args.latent_dim)
         model.load_state_dict(torch.load(args.model_path, map_location=device))
         model.to(device)
         model.eval()
 
         # --- Load dataset ---
-        # Reshape to 1x100x100 for Conv2d
-        craters = craters.reshape(-1, 1, 100, 100)
-        dataset = TensorDataset(torch.tensor(craters))
+
+        dataset = TensorDataset(torch.from_numpy(craters))
         loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
         # --- Encode latents ---
@@ -45,7 +52,7 @@ def main(args):# --- Arguments ---
         with torch.no_grad():
             for batch in loader:
                 x = batch[0].to(device)
-                latent = model.encoder(x)
+                latent = model.encode(x)
                 latents.append(latent.cpu().numpy())
         latents = np.concatenate(latents, axis=0)
 
@@ -89,7 +96,7 @@ def main(args):# --- Arguments ---
     metadata = pd.read_csv(args.metadata_path)
     coords = metadata[['x', 'y']].values
 
-    fig_reg, emb, labels = cluster_and_plot(
+    _, _, _, labels = cluster_and_plot(
         latent=latents,
         technique=args.technique,
         n_clusters=args.num_clusters,

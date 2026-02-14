@@ -4,24 +4,24 @@ import shutil
 
 
 # --- Parameters of the Run ---
-AUTOENCODER_MODEL = "mae"  # "cae" or "mae"
+AUTOENCODER_MODEL = "cae"  # "cae" or "mae"
 LATENT_DIM = 40
 PRETRAINED_MODEL = "facebook/vit-mae-base"  # for MAE: "facebook/vit-mae-base" or "facebook/vit-mae-large"
 FREEZE_UNTIL = 0 # number of encoder transformer blocks to freeze from the end (negative number)
 TECHNIQUE = "pca" # visulization tecnique "pca" or "tsne" or "umap"
 NUM_CLUSTERS = 4
 CLUSTER_METHOD = "kmeans"  # "kmeans" or "gmm" or "spectral" or "agglomerative" or "hdbscan"
-EPOCHS = 50 # number of training epochs
+EPOCHS = 25 # number of training epochs
 MASK_RATIO = 0.75  # masking ratio for MAE training
 MIN_DIAMETER = 1.0
 MAX_DIAMETER = 10.0
 
 # --- Define the run name once ---
 if AUTOENCODER_MODEL == "cae":
-    RUN_NAME = f"{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}_{LATENT_DIM}"  # example: "-4_100_facemae_0.75_no_transforms_weightdecay"
+    RUN_NAME = f"sigma50_{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}_{LATENT_DIM}"  # example: "-4_100_facemae_0.75_no_transforms_weightdecay"
     RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{RUN_NAME}"
 elif AUTOENCODER_MODEL == "mae":
-    RUN_NAME = f"{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}__mask{MASK_RATIO}_freeze{FREEZE_UNTIL}"
+    RUN_NAME = f"lola_albedo_corrected_{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}__mask{MASK_RATIO}_freeze{FREEZE_UNTIL}"
     RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{PRETRAINED_MODEL}/{RUN_NAME}"
 else:
     raise ValueError("Unsupported AUTOENCODER_MODEL. Choose 'cae' or 'mae'.")
@@ -67,19 +67,19 @@ rule all:
 # --- Data Preprocessing Rule ---
 rule preprocess_craters:
     input:
-        map_file="data/raw/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif",
+        map_file="data/raw/lroc_albedo_corrected.tif",
         craters_csv="data/raw/lunar_crater_database_robbins_2018.csv"
     output:
-        output_dir=directory(f"data/processed/{AUTOENCODER_MODEL}/crater_crops"),
-        np_output=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
-        metadata_output=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv"
+        output_dir=directory(f"data/processed_albedo/{AUTOENCODER_MODEL}/crater_crops"),
+        np_output=f"data/processed_albedo/{AUTOENCODER_MODEL}/craters.npy",
+        metadata_output=f"data/processed_albedo/{AUTOENCODER_MODEL}/metadata.csv"
     params:
         min_diameter=MIN_DIAMETER,
         max_diameter=MAX_DIAMETER,
         lat_min=-60,
         lat_max=60,
         offset=0.5,  # in crater diameters
-        craters_to_output=-1,   # -1 for all craters
+        craters_to_output=50,   # -1 for all craters
         batch_size = 64,
         autoencoder_model = AUTOENCODER_MODEL,
         target_size = 224   
@@ -220,7 +220,7 @@ rule reconstruct_edge_case:
         
 rule train_autoencoder:
     input:
-        npy=f"data/processed/{AUTOENCODER_MODEL}/craters.npy"
+        npy=f"data/processed_filter/{AUTOENCODER_MODEL}/craters.npy"
     output:
         model=f"{MODELS_DIR}/autoencoder.pth",
         loss=f"{MODELS_DIR}/loss_curve.png",
@@ -243,7 +243,7 @@ rule train_autoencoder:
 
     shell:
         """
-        PYTHONPATH=$(pwd) python src/train/train.py \
+        PYTHONPATH=$(pwd) python3 src/train/train.py \
             --autoencoder_model {params.autoencoder_model} \
             --input {input.npy} \
             --model_output {output.model} \
@@ -264,10 +264,10 @@ rule train_autoencoder:
 
 rule reconstruct_craters:
     input:
-        npy=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
+        npy=f"data/processed_filter/{AUTOENCODER_MODEL}/craters.npy",
         model=f"{MODELS_DIR}/autoencoder.pth"
     output:
-        reconstructions=f"{MODELS_DIR}/reconstructions_try.png"
+        reconstructions=f"{MODELS_DIR}/reconstructions.png"
     params:
         autoencoder_model=AUTOENCODER_MODEL,
         device="cpu",
@@ -320,8 +320,8 @@ rule encode_latents:
 
 rule plot_latent_dots:
     input:
-        latents=f"{RESULTS_DIR}/latents_julie_with_flip.npy",
-        states=f"{RESULTS_DIR}/states_julie.npy"
+        latents=f"{RESULTS_DIR}/latents.npy",
+        states=f"{RESULTS_DIR}/states.npy"
     output:
         f"{RESULTS_DIR}/clustering_julie_with_flip_dots_{TECHNIQUE}.png"
     params:
@@ -339,7 +339,7 @@ rule plot_latent_dots:
 
 rule plot_latent_imgs:
     input:
-        latents=f"{RESULTS_DIR}/latents_julie_with_flip.npy",
+        latents=f"{RESULTS_DIR}/latents.npy",
         imgs_dir="data/raw/craters_for_danny"
     output:
         f"{RESULTS_DIR}/clustering_julie_imgs_{TECHNIQUE}.png"
@@ -360,8 +360,8 @@ rule plot_latent_imgs:
 rule display_clusters:
     input:
         model=f"{MODELS_DIR}/autoencoder.pth",
-        dataset=f"data/processed/{AUTOENCODER_MODEL}/craters.npy",
-        metadata=f"data/processed/{AUTOENCODER_MODEL}/metadata.csv",
+        dataset=f"data/processed_filter/{AUTOENCODER_MODEL}/craters.npy",
+        metadata=f"data/processed_filter/{AUTOENCODER_MODEL}/metadata.csv",
     output:
         df=f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv",
         clustering_png=f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.png"

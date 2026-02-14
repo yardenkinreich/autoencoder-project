@@ -6,7 +6,6 @@ import rasterio
 import matplotlib.pyplot as plt
 from src.helper_functions import *
 import cv2
-from transformers import AutoImageProcessor
 import torchvision.transforms as transforms
 from PIL import Image
 
@@ -52,41 +51,44 @@ def process_and_save_crater_crops(
     save_raw_crops=True,
     save_np_array=True,
     output_path=None,
-    target_size=224,  # Final size for both CAE and MAE
-    num_channels=3    # 3 for RGB (MAE), 1 for grayscale (CAE)
+    target_size=224,
+    num_channels=3
 ):
     """
-    Unified preprocessing pipeline for both CAE and MAE:
+    Simplified preprocessing pipeline WITHOUT normalization:
     1. Crop crater from map with offset
-    2. Resize to 256x256
-    3. Center crop to 224x224
+    2. Flip crater (shadow to right) - done inside crop_crater()
+    3. Resize directly to 224x224 (no center crop needed)
     4. Convert to target channels (1 for CAE, 3 for MAE)
-    5. Compute dataset statistics (mean, std)
-    6. Normalize using dataset statistics
-    7. Save individual crops and numpy array
+    5. Compute and save statistics (NO normalization applied)
+    6. Save individual crops and numpy array
     """
     os.makedirs(output_dir, exist_ok=True)
     
     craters_crs = get_craters_crs()
     N = len(filtered_craters)
     
-    # Transform pipeline (no normalization yet)
-    transform_no_norm = transforms.Compose([
-        transforms.Resize(256, interpolation=Image.BICUBIC),
-        transforms.CenterCrop(target_size),
-        transforms.ToTensor()  # Converts to [0, 1]
+    # Simplified transform: just resize to target size
+    transform = transforms.Compose([
+        transforms.Resize((target_size, target_size), interpolation=Image.BICUBIC),
+        transforms.ToTensor()  # Converts to [0, 1], shape (C, H, W)
     ])
     
-    # Create temporary memmap for storing unnormalized data
-    temp_memmap = None
+    # Create memmap for storing data
+    crater_memmap = None
     if save_np_array and output_path is not None:
-        temp_shape = (N, num_channels, target_size, target_size)
-        temp_memmap = np.memmap(
-            output_path + ".temp", dtype=np.float32, mode="w+", shape=temp_shape
+        shape = (N, num_channels, target_size, target_size)
+        crater_memmap = np.memmap(
+            output_path, dtype=np.float32, mode="w+", shape=shape
         )
     
-    print(f"=== PASS 1: Loading and cropping {N} craters ===")
+    print(f"=== Processing {N} craters (NO normalization) ===")
     print(f"Target size: {target_size}x{target_size}, Channels: {num_channels}")
+    print(f"Pipeline: Crop → Flip (inside crop_crater) → Resize to {target_size}")
+    
+    # Track flipping statistics
+    flip_check_count = 0
+    flipped_correctly = 0
     
     with rasterio.open(map_file) as map_ref:
         transformer = pyproj.Transformer.from_crs(
@@ -98,6 +100,7 @@ def process_and_save_crater_crops(
                 print(f"Processed {i}/{N}")
             
             # Crop crater from map
+            # NOTE: crop_crater() already calls flip_crater() internally!
             crater_img = crop_crater(
                 map_ref,
                 crater["LAT_CIRC_IMG"],
@@ -107,31 +110,64 @@ def process_and_save_crater_crops(
                 transformer
             )
             
-            # Ensure proper dimensions
+            # === FLIP VERIFICATION (first 100 craters) ===
+            # Check AFTER crop_crater (which includes flip)
+            if i < 100:
+                qtr = crater_img.shape[1] // 4
+                half = crater_img.shape[1] // 2
+                left_side = crater_img[:, qtr:half]
+                right_side = crater_img[:, half:-qtr]
+                left_mean = left_side.mean()
+                right_mean = right_side.mean()
+                
+                flip_check_count += 1
+                if right_mean < left_mean:  # Shadow should be on right (darker)
+                    flipped_correctly += 1
+                
+                if i < 10:  # Print details for first 10
+                    print(f"  Crater {i} (after flip): Left={left_mean:.2f}, Right={right_mean:.2f}, "
+                          f"Shadow on {'RIGHT ✓' if right_mean < left_mean else 'LEFT ✗'}")
+            
+            # Ensure proper dimensions for PIL (convert grayscale to RGB if needed)
             if crater_img.ndim == 2:
-                crater_img = np.stack([crater_img] * 3, axis=-1)  # Convert grayscale to RGB
+                crater_img = np.stack([crater_img] * 3, axis=-1)
             
             # Convert to PIL and apply transforms
             pil_img = Image.fromarray(crater_img.astype(np.uint8), mode="RGB")
-            tensor_img = transform_no_norm(pil_img)  # Shape: (3, 224, 224), range [0, 1]
+            tensor_img = transform(pil_img)  # Shape: (3, 224, 224), range [0, 1]
             
             # Convert to target number of channels
             if num_channels == 1:
                 # Convert RGB to grayscale for CAE
                 tensor_img = tensor_img.mean(dim=0, keepdim=True)  # Shape: (1, 224, 224)
             
-            # Store in temporary memmap
-            if temp_memmap is not None:
-                temp_memmap[i] = tensor_img.numpy()
+            # Store in memmap
+            if crater_memmap is not None:
+                crater_memmap[i] = tensor_img.numpy()
+            
+            # Save individual crop
+            if save_raw_crops:
+                crater_id = filtered_craters.iloc[i]["CRATER_ID"]
+                crop_data = tensor_img.numpy()  # Shape: (C, H, W), NO normalization
+                np.save(os.path.join(output_dir, f"{crater_id}.npy"), crop_data)
     
-    if temp_memmap is None:
-        print("Error: temp_memmap is None")
+    if crater_memmap is not None:
+        crater_memmap.flush()
+    
+    # Print flip statistics
+    print(f"\n=== FLIP VERIFICATION (first {flip_check_count} craters) ===")
+    print(f"Correctly flipped (shadow on right): {flipped_correctly}/{flip_check_count} "
+          f"({100*flipped_correctly/flip_check_count:.1f}%)")
+    if flipped_correctly < flip_check_count * 0.8:
+        print("⚠️  WARNING: Less than 80% of craters have shadow on right!")
+        print("   Check if flip_crater() logic is correct or if illumination is unusual")
+    
+    # === Compute dataset statistics (for reference only, NOT applied) ===
+    print("\n=== Computing dataset statistics (for reference) ===")
+    
+    if crater_memmap is None:
+        print("No memmap to compute statistics from")
         return
-    
-    temp_memmap.flush()
-    
-    # === Step 2: Compute dataset statistics ===
-    print("\n=== PASS 2: Computing dataset statistics ===")
     
     chunk_size = 1000
     
@@ -142,8 +178,8 @@ def process_and_save_crater_crops(
     
     for start_idx in range(0, N, chunk_size):
         end_idx = min(start_idx + chunk_size, N)
-        chunk = temp_memmap[start_idx:end_idx]
-        sum_pixels += chunk.sum(axis=(0, 2, 3))  # Sum per channel
+        chunk = crater_memmap[start_idx:end_idx]
+        sum_pixels += chunk.sum(axis=(0, 2, 3))
         total_pixels += chunk.shape[0] * chunk.shape[2] * chunk.shape[3]
     
     dataset_mean = sum_pixels / total_pixels
@@ -154,7 +190,7 @@ def process_and_save_crater_crops(
     
     for start_idx in range(0, N, chunk_size):
         end_idx = min(start_idx + chunk_size, N)
-        chunk = temp_memmap[start_idx:end_idx]
+        chunk = crater_memmap[start_idx:end_idx]
         
         for c in range(num_channels):
             diff = chunk[:, c, :, :] - dataset_mean[c]
@@ -162,98 +198,33 @@ def process_and_save_crater_crops(
     
     dataset_std = np.sqrt(sum_squared_diff / total_pixels)
     
-    print(f"\n=== DATASET STATISTICS ===")
+    print(f"\n=== DATASET STATISTICS (NOT APPLIED) ===")
     print(f"Mean per channel: {dataset_mean}")
     print(f"Std per channel: {dataset_std}")
     print(f"Total pixels: {total_pixels:,}")
+    print(f"Value range: [0, 1] (from ToTensor)")
     
-    # Sanity checks
-    if np.any(dataset_std < 0.01):
-        print("⚠️  WARNING: Very low std detected.")
-    if np.any(dataset_std > 0.5):
-        print("⚠️  WARNING: Very high std detected.")
-    
-    # === Step 3: Apply normalization and save ===
-    print("\n=== PASS 3: Normalizing and saving ===")
-    
-    # Create final memmap for normalized data
-    crater_memmap = np.memmap(
-        output_path, dtype=np.float32, mode="w+", 
-        shape=(N, num_channels, target_size, target_size)
-    )
-    
-    for start_idx in range(0, N, chunk_size):
-        if start_idx % 10000 == 0:
-            print(f"Normalizing {start_idx}/{N}")
-        
-        end_idx = min(start_idx + chunk_size, N)
-        chunk = temp_memmap[start_idx:end_idx].copy()
-        
-        # Debug: print before normalization
-        if start_idx == 0:
-            print(f"  Before normalization - chunk mean: {chunk.mean():.6f}, std: {chunk.std():.6f}")
-        
-        # Apply normalization: (x - mean) / std
-        '''
-        for c in range(num_channels):
-            chunk[:, c, :, :] = (chunk[:, c, :, :] - dataset_mean[c]) / (dataset_std[c] + 1e-8)
-            '''
-        
-        # Debug: print after normalization
-        if start_idx == 0:
-            print(f"  After normalization - chunk mean: {chunk.mean():.6f}, std: {chunk.std():.6f}")
-        
-        # Write normalized data to memmap
-        crater_memmap[start_idx:end_idx] = chunk
-        
-        # Save individual normalized crops if requested
-        if save_raw_crops:
-            for local_idx in range(end_idx - start_idx):
-                global_idx = start_idx + local_idx
-                crater_id = filtered_craters.iloc[global_idx]["CRATER_ID"]
-                crop_data = chunk[local_idx]  # Shape: (C, H, W), already normalized
-                np.save(os.path.join(output_dir, f"{crater_id}.npy"), crop_data)
-    
-    crater_memmap.flush()
-    
-    # Clean up temp file
-    del temp_memmap
-    os.remove(output_path + ".temp")
-    
-    print(f"\n✅ Finished processing {N} craters. Data saved to {output_path}")
-    
-    # === Validation - reload from disk to verify ===
-    print("\n=== VALIDATION: Normalized dataset statistics ===")
-    
-    # IMPORTANT: Reload the memmap from disk to ensure we're reading what was actually saved
-    del crater_memmap  # Close the write memmap
-    
-    # Open read-only for validation
-    validation_memmap = np.memmap(
-        output_path, dtype=np.float32, mode='r',
-        shape=(N, num_channels, target_size, target_size)
-    )
+    # === Validation ===
+    print("\n=== VALIDATION: Dataset value ranges ===")
     
     sample_size = min(1000, N)
-    sample_data = validation_memmap[:sample_size]
+    sample_data = crater_memmap[:sample_size]
     print(f"Sample size: {sample_size}")
     print(f"Range: [{sample_data.min():.4f}, {sample_data.max():.4f}]")
-    print(f"Mean: {sample_data.mean():.4f} (should be ~0)")
-    print(f"Std: {sample_data.std():.4f} (should be ~1)")
-    print(f"Per-channel means: {sample_data.mean(axis=(0,2,3))} (should be ~0)")
-    print(f"Per-channel stds: {sample_data.std(axis=(0,2,3))} (should be ~1)")
+    print(f"Mean: {sample_data.mean():.4f}")
+    print(f"Std: {sample_data.std():.4f}")
     
-    # Outlier check
-    print(f"\n=== OUTLIER CHECK ===")
-    print(f"Values < -3: {(sample_data < -3).sum()} pixels")
-    print(f"Values > 3: {(sample_data > 3).sum()} pixels")
-    print(f"99th percentile: {np.percentile(sample_data, 99):.4f}")
-    print(f"1st percentile: {np.percentile(sample_data, 1):.4f}")
+    if num_channels == 3:
+        print(f"Per-channel means: {sample_data.mean(axis=(0,2,3))}")
+        print(f"Per-channel stds: {sample_data.std(axis=(0,2,3))}")
     
-    # Save statistics
+    # Save statistics (for reference if needed later)
     stats_path = output_path.replace('.dat', '_stats.npz')
     np.savez(stats_path, mean=dataset_mean, std=dataset_std)
-    print(f"\nSaved normalization statistics to {stats_path}")
+    print(f"\nSaved statistics to {stats_path} (for reference only)")
+    
+    print(f"\n✅ Finished processing {N} craters. Data saved to {output_path}")
+    print("NOTE: Data is in range [0, 1] with NO normalization applied!")
 
 
 def save_crater_metadata(filtered_craters, map_file, output_path):
@@ -294,26 +265,10 @@ def save_crater_metadata(filtered_craters, map_file, output_path):
                 df.to_csv(output_path, index=False)
 
 
-# Example usage:
-# For MAE (RGB):
-# process_and_save_crater_crops_unified(
-#     filtered_craters, map_file, output_dir, offset,
-#     save_raw_crops=True, save_np_array=True, output_path="mae_craters.dat",
-#     target_size=224, num_channels=3
-# )
-
-# For CAE (Grayscale):
-# process_and_save_crater_crops_unified(
-#     filtered_craters, map_file, output_dir, offset,
-#     save_raw_crops=True, save_np_array=True, output_path="cae_craters.dat",
-#     target_size=224, num_channels=1
-# )
-
-
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--map_file', required=True)
+    parser.add_argument('--map_file', required=True, help='Path to lunar mosaic (LROC or albedo-corrected)')
     parser.add_argument('--craters_csv', required=True)
     parser.add_argument('--output_dir', required=True)
     parser.add_argument('--np_output_path', required=True)
@@ -327,7 +282,6 @@ if __name__ == '__main__':
     parser.add_argument('--save_np_array', action='store_true')
     parser.add_argument('--target_size', type=int, default=224)
     parser.add_argument('--autoencoder_model', type=str, choices=['cae', 'mae'], default='cae')
-    parser.add_argument('--batch_size', type=int, default=64)
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -354,9 +308,7 @@ if __name__ == '__main__':
             target_size=args.target_size,
             num_channels=1
         )
-            # Save crater metadata
         save_crater_metadata(filtered, args.map_file, args.info_output_path)
-    
         print("Processing complete!")
 
     elif args.autoencoder_model == 'mae':   
@@ -371,6 +323,5 @@ if __name__ == '__main__':
             target_size=args.target_size,
             num_channels=3
         )
-        
         save_crater_metadata(filtered, args.map_file, args.info_output_path)
         print("Processing complete!")

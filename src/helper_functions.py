@@ -20,20 +20,22 @@ try:
     from cuml.manifold import TSNE as cuTSNE
     from cuml.decomposition import PCA as cuPCA
     from cuml.cluster import KMeans as cuKMeans
+    from cuml import UMAP as cuUMAP
 
     GPU_AVAILABLE = True
+    print("RAPIDS cuML imported successfully. GPU computations enabled.")
 except ImportError:
     pass
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-GPU_AVAILABLE = False
 from matplotlib import colors
 import argparse
 import os
 from PIL import Image
 from torchvision import transforms
+
 
 
 # Data Preprocessing Functions
@@ -91,7 +93,7 @@ def flip_crater(img):
 def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None, 
                      random_state=42, use_gpu=False, cluster_method='kmeans',
                      imgs_dir=None, ground_truth_labels=None, state_labels=None, 
-                     state_colors=None):
+                     state_colors=None, reduce_latent_95=False):
     """
     Cluster a latent space using KMeans or other methods and visualize in 2D using PCA or t-SNE.
     Can use GPU via RAPIDS cuML if available and use_gpu=True.
@@ -116,26 +118,20 @@ def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None,
     # Validation
     if latents.shape[0] < n_clusters:
         raise ValueError(f"Number of samples ({latents.shape[0]}) must be >= n_clusters ({n_clusters})")
-    
-    # --- Dimensionality reduction ---
-    '''
-    if technique.lower() == 'pca':
-        if use_gpu and GPU_AVAILABLE:
-            reducer = cuPCA(n_components=0.95, random_state=random_state)
-        else:
-            reducer = PCA(n_components=0.95, random_state=random_state)
-
-    embedding_lower_dim = reducer.fit_transform(latents)
-
     print("Original latent dim:", latents.shape[1])
-    print("After PCA (95% variance):", embedding_lower_dim.shape[1])
-    '''
+
+    # --- Latent Dimensionality Reduction ---
+    if reduce_latent_95:
+        reducer_95 = PCA(n_components=0.95, random_state=random_state)
+        latents = reducer_95.fit_transform(latents)
+        print("After PCA (95% variance):", latents.shape[1])
 
     # --- Clustering ---
 
     cluster_method = cluster_method.lower()
     if cluster_method == 'kmeans':
         if use_gpu and GPU_AVAILABLE:
+            latents = cp.asarray(latents)
             cluster_labels = cuKMeans(n_clusters=n_clusters, random_state=random_state).fit_predict(latents)
             cluster_labels_cpu = cp.asnumpy(cluster_labels)
         else:
@@ -174,8 +170,9 @@ def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None,
         )
         cluster_labels = agg.fit_predict(data_to_cluster)
         cluster_labels_cpu = cluster_labels
-    
-    
+
+    print(f"Finished Clustering! Clustering method: {cluster_method}, Number of clusters: {n_clusters}")
+
     # --- Plotting Tactic ---
 
     n_samples = latents.shape[0] if not use_gpu else int(latents.shape[0])
@@ -192,7 +189,10 @@ def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None,
             plot_reduce = TSNE(n_components=2, random_state=random_state)
             
     elif technique.lower() == 'umap':
-        plot_reduce = umap.UMAP(n_components=2, random_state=random_state)
+        if use_gpu and GPU_AVAILABLE:
+            plot_reduce = cuUMAP(n_components=2, random_state=random_state)
+        else:
+            plot_reduce = umap.UMAP(n_components=2, random_state=random_state)
         
     else:
         raise ValueError("technique must be 'pca' or 'tsne' or 'umap'")

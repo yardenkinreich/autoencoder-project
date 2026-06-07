@@ -2,323 +2,305 @@ import os
 import argparse
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset, random_split
 import torch.nn as nn
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, CosineAnnealingWarmRestarts
-import matplotlib.pyplot as plt
-from src.models.autoencoder import ConvAutoencoder
-import timm
-#from transformers import ViTMAEForPreTraining
 import torch.optim as optim
-from src.helper_functions import *
-import torchvision.transforms.v2 as T
+import torchvision.transforms.functional as TF
+from torch.utils.data import DataLoader, Dataset
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import matplotlib.pyplot as plt
+import random
 import sys
+
 sys.path.append(os.path.abspath("src/models/mae"))
-from src.models.mae.models_mae import *
+from src.models.autoencoder import ConvAutoencoder
+from src.models.mae.models_mae import MaskedAutoencoderViT
+from src.helper_functions import *
+
+# ── constants ─────────────────────────────────────────────────────────────
+# Preprocessing now outputs tensors at OUTPUT_SIZE directly (default 128).
+# There is no longer an intermediate EXTRACT_SIZE on disk — the DataLoader
+# receives ready-to-use (C, OUTPUT_SIZE, OUTPUT_SIZE) tensors.
+# Derive INPUT_SIZE from the memmap shape at runtime (see load_memmap).
 
 
+# ── dataset ───────────────────────────────────────────────────────────────
+class CraterDataset(Dataset):
+    """
+    Wraps a pre-processed memmap of shape (N, C, H, W).
+
+    Training  (augment=True)
+    ─────────────────────────
+    Applies lightweight on-the-fly augmentation on top of the stored tensor:
+      • Random H-flip  p=0.5
+      • Random V-flip  p=0.5
+
+    If you passed the *augmented* .dat (craters_aug.dat) as input, each
+    sample already has a unique random rotation baked in from preprocessing.
+    The flips add two more degrees of freedom without any resampling cost.
+
+    If you passed the *clean* .dat (craters_clean.dat), you may want to add
+    rotation here as well — see the commented-out block below.
+
+    Validation (augment=False)
+    ───────────────────────────
+    Tensors are returned as-is. No randomness.
+    """
+
+    def __init__(self, data: np.ndarray, augment: bool = True):
+        self.data    = data
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img = torch.from_numpy(self.data[idx].copy())   # (C, H, W)
+
+        if self.augment:
+            angle = random.uniform(0.0, 360.0)
+            mean_val = img.mean().item()
+            img = TF.rotate(img, angle,
+                            interpolation=TF.InterpolationMode.BILINEAR,
+                            fill=mean_val)
+
+        return (img,)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────
+def load_memmap(path: str, num_channels: int) -> np.memmap:
+    """
+    Infer N from file size.  Works for any OUTPUT_SIZE because we read
+    the spatial dimension from the file size rather than hardcoding it.
+    """
+    file_size   = os.path.getsize(path)
+    total_floats = file_size // 4          # float32 = 4 bytes
+    # total_floats = N × C × H × W
+    # We know C; we need to find N and H (H == W assumed square).
+    # Try OUTPUT_SIZE values that are divisible by 16 (ViT patch constraint).
+    for size in [128]:
+        if total_floats % (num_channels * size * size) == 0:
+            N = total_floats // (num_channels * size * size)
+            print(f"  Detected memmap shape : ({N}, {num_channels}, {size}, {size})")
+            return np.memmap(path, dtype=np.float32, mode='r',
+                             shape=(N, num_channels, size, size))
+    raise ValueError(
+        f"Cannot infer spatial size from {path}. "
+        f"File has {total_floats} floats with {num_channels} channel(s). "
+        "Expected one of: 64, 128, 224, 256, 336."
+    )
+
+
+def make_split(data, val_split, seed):
+    rng   = np.random.default_rng(seed)
+    idx   = rng.permutation(len(data))
+    val_n = int(len(data) * val_split)
+    return data[idx[val_n:]], data[idx[:val_n]]
+
+
+def load_pretrained_single_channel(model, checkpoint_path):
+    """
+    Load RGB pretrained MAE weights into a 1-channel model.
+    The patch embedding conv weight (embed_dim, 3, P, P) is averaged
+    across the 3 input channels → (embed_dim, 1, P, P).
+    All other weights load as-is; mismatched keys stay randomly initialised.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = checkpoint['model']
+
+    rgb_weight  = state_dict['patch_embed.proj.weight']   # (D, 3, P, P)
+    gray_weight = rgb_weight.mean(dim=1, keepdim=True)    # (D, 1, P, P)
+    state_dict['patch_embed.proj.weight'] = gray_weight
+
+    msg = model.load_state_dict(state_dict, strict=False)
+    print("Pretrained weights loaded.")
+    print(f"  Missing keys   : {msg.missing_keys}")
+    print(f"  Unexpected keys: {msg.unexpected_keys}")
+    return model
+
+
+def plot_losses(train_losses, val_losses, save_path):
+    plt.figure(figsize=(8, 5))
+    plt.plot(train_losses, label='Train')
+    plt.plot(val_losses,   label='Val')
+    plt.text(len(train_losses) - 1, train_losses[-1],
+             f"{train_losses[-1]:.4f}", color='tab:blue',
+             ha='right', va='bottom', fontsize=9)
+    plt.text(len(val_losses) - 1, val_losses[-1],
+             f"{val_losses[-1]:.4f}", color='tab:orange',
+             ha='right', va='bottom', fontsize=9)
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+
+# ── main ──────────────────────────────────────────────────────────────────
 def main(args):
-
-    # --- Reproducibility ---
     seed = 42
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark     = False
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    device       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    num_channels = 1
+    print(f"Device : {device}")
 
+    # ── load data ─────────────────────────────────────────────────────────
+    print(f"Loading : {args.input}")
+    craters = load_memmap(args.input, num_channels)
+    print(f"  Total : {len(craters)}")
+
+    # track positions in ORIGINAL .dat coordinates throughout
+    orig_index = np.arange(len(craters))          # full-file indices
+
+    if args.num_samples is not None:
+        n   = min(args.num_samples, len(craters))
+        sub = np.random.default_rng(seed).choice(len(craters), size=n, replace=False)
+        craters    = craters[sub]
+        orig_index = orig_index[sub]              # subset positions in .dat coords
+        print(f"  Subset : {len(craters)}")
+
+    print(f"  Range  : [{craters.min():.3f}, {craters.max():.3f}]")
+
+    # ── train / val split (mirrors make_split, but also splits orig_index) ──
+    rng   = np.random.default_rng(seed)
+    perm  = rng.permutation(len(craters))
+    val_n = int(len(craters) * args.val_split)
+    val_perm, train_perm = perm[:val_n], perm[val_n:]
+
+    train_data, val_data = craters[train_perm], craters[val_perm]
+    train_orig = orig_index[train_perm]           # in .dat coords
+    val_orig   = orig_index[val_perm]
+
+    # "the rest": everything in the full file not in the chosen num_samples
+    test_orig  = np.setdiff1d(np.arange(len(load_memmap(args.input, num_channels))),
+                            orig_index)
+
+    print(f"  Train / Val / Test : {len(train_orig)} / {len(val_orig)} / {len(test_orig)}")
+
+    # ── persist split indices (original .dat coordinates) ───────────────────
+    out_dir = os.path.dirname(args.model_output)
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(os.path.join(out_dir, "train_idx.npy"), train_orig)
+    np.save(os.path.join(out_dir, "val_idx.npy"),   val_orig)
+    np.save(os.path.join(out_dir, "test_idx.npy"),  test_orig)
+    print(f"  Split indices saved → {out_dir}")
+
+    # ── datasets & loaders ────────────────────────────────────────────────
+    # augment=True for training so H/V flips are applied on-the-fly.
+    # If training on the clean branch, also uncomment the rotation block
+    # inside CraterDataset.__getitem__.
+    train_dataset = CraterDataset(train_data, augment=False)
+    val_dataset   = CraterDataset(val_data,   augment=False)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                              shuffle=True,  num_workers=4, pin_memory=True)
+    val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size,
+                              shuffle=False, num_workers=4, pin_memory=True)
+
+    # ── model ─────────────────────────────────────────────────────────────
     if args.autoencoder_model == 'cae':
-        # Load data
-        file_size = os.path.getsize(args.input)
-        N = file_size // (224 * 224 * 1 * 4)
-        craters = arr = np.memmap(
-            args.input,
-            dtype=np.float32,
-            mode="r",
-            shape=(N, 1, 224, 224)
-            )
-        num_samples = args.num_samples if args.num_samples is not None else len(craters)
-        num_samples = min(num_samples, len(craters))
-        rng = np.random.default_rng(seed)
-        sample_indices = rng.choice(len(craters), size=num_samples, replace=False)
-        craters_subset = craters[sample_indices]
-
-        print(f"Data range: min={craters_subset.min()}, max={craters_subset.max()}, mean={craters_subset.mean()}")
-
-        dataset = TensorDataset(torch.from_numpy(craters_subset))
-
-        # --- Train/val split (deterministic) ---
-        val_size = int(len(dataset) * args.val_split)
-        train_size = len(dataset) - val_size
-        train_dataset, val_dataset = random_split(
-            dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(seed)
-        )
-
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
-
-        # Model, loss, optimizer
-        model = ConvAutoencoder(latent_dim=args.latent_dim).to(device)
+        model     = ConvAutoencoder(latent_dim=args.latent_dim).to(device)
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-
-        # Training loop
-        train_losses = []
-        val_losses = []
-        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
-
-        for epoch in range(args.epochs):
-            model.train()
-            running_loss = 0.0
-            for batch in train_loader:
-                inputs = batch[0].to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, inputs)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                running_loss += loss.item() * inputs.size(0)
-            epoch_train_loss = running_loss / train_size
-            train_losses.append(epoch_train_loss)
-
-            model.eval()
-            running_val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_loader:
-                    inputs = batch[0].to(device)
-                    outputs = model(inputs)
-                    loss = criterion(outputs, inputs)
-                    running_val_loss += loss.item() * inputs.size(0)
-            epoch_val_loss = running_val_loss / val_size
-            val_losses.append(epoch_val_loss)
-
-            scheduler.step()
-            current_lr = optimizer.param_groups[0]['lr']
-
-            print(f"Epoch [{epoch+1}/{args.epochs}] - Train Loss: {epoch_train_loss:.4f}, Val Loss: {epoch_val_loss:.4f}", 
-                f"LR: {current_lr:.2e}")
-
-        # Save model and loss plot
-        os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
-        torch.save(model.state_dict(), args.model_output)
-
-        plt.figure(figsize=(8,5))
-        plt.plot(train_losses, label="Train Loss")
-        plt.plot(val_losses, label="Validation Loss")
-        plt.xlabel("Epoch")
-        plt.ylabel("MSE Loss")
-        plt.title("Training and Validation Loss")
-        plt.legend()
-        plt.savefig(args.loss_plot)
-        plt.close()
-
-        '''
-        # Save latent vectors for clustering
-        latent_list = []
-
-        model.eval()
-        with torch.no_grad():
-            for i in range(0, len(craters), args.batch_size):
-                batch = torch.from_numpy(craters[i:i+args.batch_size]).to(device)
-                latent_batch = model.encode(batch).cpu().numpy()
-                latent_list.append(latent_batch)
-
-        os.makedirs(os.path.dirname(args.latent_output), exist_ok=True)
-        latent_vectors = np.concatenate(latent_list, axis=0)
-        np.save(args.latent_output, latent_vectors)
-        '''
 
     elif args.autoencoder_model == 'mae':
-        # Load data
-        file_size = os.path.getsize(args.input)
-        N = file_size // (224 * 224 * 3 * 4)
-        craters = arr = np.memmap(
-            args.input,
-            dtype=np.float32,
-            mode="r",
-            shape=(N, 3, 224, 224)
-            )
-        num_samples = args.num_samples if args.num_samples is not None else len(craters)
-        num_samples = min(num_samples, len(craters))
-        rng = np.random.default_rng(seed)
-        sample_indices = rng.choice(len(craters), size=num_samples, replace=False)
-        craters_subset = craters[sample_indices]
+        model = MaskedAutoencoderViT(        # ← was mae_vit_base_patch16(...)
+            img_size=128,
+            patch_size=8,
+            in_chans=1,
+            norm_pix_loss=True,
+            embed_dim=768,
+            depth=12,
+            num_heads=12,
+            decoder_embed_dim=512,
+            decoder_depth=8,
+            decoder_num_heads=16,
+            mlp_ratio=4.0,
+    )
+        model = model.to(device)
+        if args.pretrained_weights and os.path.exists(args.pretrained_weights):
+            print(f"Loading pretrained weights : {args.pretrained_weights}")
+            model = load_pretrained_single_channel(model, args.pretrained_weights)
+        else:
+            print("No pretrained weights — training from scratch.")
+        model = model.to(device)
 
-        print(f"Data range: min={craters_subset.min()}, max={craters_subset.max()}, mean={craters_subset.mean()}")
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=args.weight_decay
+    )
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
 
-        dataset = TensorDataset(torch.from_numpy(craters_subset))
+    # ── training loop ─────────────────────────────────────────────────────
+    train_losses, val_losses = [], []
 
-        # --- Train/val split (deterministic) ---
-        val_size = int(len(dataset) * args.val_split)
-        train_size = len(dataset) - val_size
-        train_dataset, val_dataset = random_split(
-            dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(seed)
-        )
+    for epoch in range(args.epochs):
+        model.train()
+        running = 0.0
+        for (imgs,) in train_loader:
+            imgs = imgs.to(device)
+            if args.autoencoder_model == 'cae':
+                loss = criterion(model(imgs), imgs)
+            else:
+                loss, _, _, _ = model(imgs, mask_ratio=args.mask_ratio)
 
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            running += loss.item() * imgs.size(0)
 
-        # Load pretrained MAE
-        model = mae_vit_base_patch16()
-        # Load pretrained weights
-        checkpoint = torch.load("src/models/mae/pretrain_mae_vit_base_full.pth", map_location="cpu")
+        train_loss = running / len(train_dataset)
+        train_losses.append(train_loss)
 
-        msg = model.load_state_dict(checkpoint['model'], strict=False)
-        print(f"Loaded pretrained MAE weights: {msg}")
-
-        for name, param in model.named_parameters():
-            param.requires_grad = True  # freeze everything
-
-        '''
-        # Unfreeze only the last few encoder layers
-        for blk in model.blocks[args.freeze_until:]:
-            for param in blk.parameters():
-                param.requires_grad = True
-
-        # Optionally unfreeze the decoder
-        for param in model.decoder_blocks.parameters():
-            param.requires_grad = True
-        '''
-        
-
-        model.to(device)
-
-        # data_training augmentations
-        train_transforms = T.Compose([
-            T.RandomVerticalFlip(p=0.5),
-            T.GaussianNoise(mean=0.0, sigma=0.01),
-            T.RandomErasing(
-                p=0.2,
-                scale=(0.02, 0.06),
-                ratio=(0.5, 2.0),
-            ),
-            ])
-
-        optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
-                lr=args.lr, weight_decay=args.weight_decay)
-
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max = args.epochs,   # total number of epochs
-            eta_min = args.min_lr       # final LR
-            )
-
-        train_losses, val_losses = [], []
-
-        print(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
-        print(f"Mask ratio: {args.mask_ratio}")
-
-
-        for epoch in range(args.epochs):
-            model.train()
-            running_train_loss = 0.0
-            for batch in train_loader:
-                imgs = batch[0].to(device)
-                #imgs = train_transforms(imgs)
-
-                loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                running_train_loss += loss.item() * imgs.size(0)
-            epoch_train_loss = running_train_loss / len(train_loader.dataset)
-            train_losses.append(epoch_train_loss)
-
-            # --- validation loop ---
-            model.eval()
-            running_val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_loader:
-                    imgs = batch[0].to(device)
-                    #inputs = {"pixel_values": imgs}
-                    
-                    val_loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
-
-
-                    running_val_loss += val_loss.item() * imgs.size(0)
-
-                epoch_val_loss = running_val_loss / len(val_loader.dataset)
-                val_losses.append(epoch_val_loss)
-            
-            scheduler.step()
-            current_lr = scheduler.get_last_lr()[0]
-            print(f"Epoch {epoch+1}/{args.epochs} | "
-                    f"Train Loss: {epoch_train_loss:.4f} | "
-                    f"Val Loss: {epoch_val_loss:.4f} | "
-                    f"LR: {current_lr:.2e}")
-
-        # Save model and loss plot
-        os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
-        torch.save(model.state_dict(), args.model_output)
-
-        plt.figure(figsize=(8,5))
-        plt.plot(train_losses, label="Train Loss")
-        plt.plot(val_losses, label="Val Loss")
-
-        # Annotate the last values
-        final_train = train_losses[-1]
-        final_val = val_losses[-1]
-        plt.text(len(train_losses)-1, final_train, f"{final_train:.4f}", 
-                color="blue", ha="right", va="bottom", fontsize=9)
-        plt.text(len(val_losses)-1, final_val, f"{final_val:.4f}", 
-                color="orange", ha="right", va="bottom", fontsize=9)
-
-        plt.xlabel("Epoch")
-        plt.ylabel("Reconstruction Loss (MSE)")
-        plt.title("Training and Validation Loss")
-        plt.legend()
-        plt.savefig(args.loss_plot)
-        plt.close()
-
-        # Save latent vectors for clustering
-        '''
-        latent_list = []
-
+        model.eval()
+        running = 0.0
         with torch.no_grad():
-            model.eval()
-            for i in range(0, len(craters_subset), args.batch_size):
-                batch = torch.tensor(craters_subset[i:i+args.batch_size], device=device)
-                #inputs = {"pixel_values": batch}
+            for (imgs,) in val_loader:
+                imgs = imgs.to(device)
+                if args.autoencoder_model == 'cae':
+                    loss = criterion(model(imgs), imgs)
+                else:
+                    loss, _, _, _ = model(imgs, mask_ratio=args.mask_ratio)
+                running += loss.item() * imgs.size(0)
 
-                # Forward encoder (with masking)
-                latent, mask, ids_restore = model.forward_encoder(batch, mask_ratio=args.mask_ratio)
+        val_loss = running / len(val_dataset)
+        val_losses.append(val_loss)
 
-                latent_list.append(latent.cpu().numpy())
+        scheduler.step()
+        print(f"Epoch {epoch+1:03d}/{args.epochs} | "
+              f"Train {train_loss:.4f} | Val {val_loss:.4f} | "
+              f"LR {scheduler.get_last_lr()[0]:.2e}")
 
-        # Concatenate all
-        latent_vectors = np.concatenate(latent_list, axis=0)
-        np.save(args.latent_output, latent_vectors)
-        print(f"Saved latent vectors of shape {latent_vectors.shape}")
-        '''
+    # ── save ──────────────────────────────────────────────────────────────
+    os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
+    torch.save(model.state_dict(), args.model_output)
+    print(f"Model saved → {args.model_output}")
+
+    plot_losses(train_losses, val_losses, args.loss_plot)
+    print(f"Loss plot  → {args.loss_plot}")
 
 
-if __name__ == "__main__":
+# ── CLI ───────────────────────────────────────────────────────────────────
+if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--autoencoder_model', type=str, choices=['cae', 'mae'], default='cae', help="Type of autoencoder model to use")
-    parser.add_argument('--input', required=True, help="Path to crater npy file")
-    parser.add_argument('--model_output', required=True, help="Path to save trained model")
-    parser.add_argument('--loss_plot', required=True, help="Path to save loss curve plot")
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--latent_dim', type=int, default=6)
-    parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--weight_decay', type=float, default=1e-5)
-    parser.add_argument('--val_split', type=float, default=0.2)
-    parser.add_argument('--lr_patience', type=int, default=5, help="Epochs to wait before reducing LR")
-    parser.add_argument('--min_lr', type=float, default=1e-8, help="Minimum learning rate")
-    parser.add_argument('--lr_factor', type=float, default=0.5, help="Factor to reduce LR by")
-    parser.add_argument('--num_samples', type=int, default=None, help="Number of craters to sample for training")
-    parser.add_argument('--freeze_until', type=int, default=-2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
-    parser.add_argument('--mask_ratio', type=float, default=0.75, help="Masking ratio for MAE training")
-#    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
+    parser.add_argument('--autoencoder_model',  choices=['cae', 'mae'], default='mae')
+    parser.add_argument('--input',              required=True,
+                        help="Path to .dat memmap (clean or augmented branch)")
+    parser.add_argument('--model_output',       required=True)
+    parser.add_argument('--loss_plot',          required=True)
+    parser.add_argument('--pretrained_weights', type=str,   default=None)
+    parser.add_argument('--epochs',             type=int,   default=50)
+    parser.add_argument('--batch_size',         type=int,   default=32)
+    parser.add_argument('--latent_dim',         type=int,   default=6)
+    parser.add_argument('--lr',                 type=float, default=1e-3)
+    parser.add_argument('--weight_decay',       type=float, default=1e-5)
+    parser.add_argument('--min_lr',             type=float, default=1e-8)
+    parser.add_argument('--val_split',          type=float, default=0.2)
+    parser.add_argument('--num_samples',        type=int,   default=None)
+    parser.add_argument('--mask_ratio',         type=float, default=0.75)
     args = parser.parse_args()
-    main(args) 
+    main(args)

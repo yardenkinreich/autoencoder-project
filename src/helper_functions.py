@@ -16,14 +16,16 @@ import umap
 
 try:
     import cupy as cp
-#    import cudf
     from cuml.manifold import TSNE as cuTSNE
     from cuml.decomposition import PCA as cuPCA
     from cuml.cluster import KMeans as cuKMeans
     from cuml import UMAP as cuUMAP
-
     GPU_AVAILABLE = True
     print("RAPIDS cuML imported successfully. GPU computations enabled.")
+except Exception:
+    GPU_AVAILABLE = False
+    print("cuML not available, falling back to CPU (sklearn).")
+    
 except ImportError:
     pass
 from sklearn.manifold import TSNE
@@ -41,11 +43,16 @@ from torchvision import transforms
 # Data Preprocessing Functions
 
 def crop_crater(map_ref, lat, lon, diameter, offset, transformer):
-
+    """
+    Updated method: Crops with offset, stretches, then uses 
+    flip_crater() on INNER CRATER ONLY to decide flip for FULL image.
+    """
     if lon > 180:
         lon -= 360
+    
     # Convert latitude and longitude to map's coordinate system
     x, y = transformer.transform(lon, lat)
+    
     # Define bounding box in projected coordinates
     radius = (diameter / 2) * 1000  # Convert km to meters
     radius_with_offset_x = (radius + radius * offset) / cos(radians(lat))
@@ -58,18 +65,16 @@ def crop_crater(map_ref, lat, lon, diameter, offset, transformer):
 
     # Read and crop the data
     cropped_image = map_ref.read(window=window)
-
     cropped_image = cropped_image.reshape((cropped_image.shape[1], cropped_image.shape[2]))
 
+    # Latitude projection
     projected_height = int(cropped_image.shape[0] / cos(radians(abs(lat))))
     if projected_height > cropped_image.shape[0]:
         cropped_image_projected = cv2.resize(cropped_image, (cropped_image.shape[1], projected_height))
     else:
         cropped_image_projected = cropped_image
 
-    flipped_image = flip_crater(cropped_image_projected)
-
-    return flipped_image
+    return cropped_image_projected
 
 
 def flip_crater(img):
@@ -120,6 +125,10 @@ def cluster_and_plot(latent, technique='tsne', n_clusters=5, save_path=None,
         raise ValueError(f"Number of samples ({latents.shape[0]}) must be >= n_clusters ({n_clusters})")
     print("Original latent dim:", latents.shape[1])
 
+    print(f"Latents shape: {latents.shape}")
+    print(f"Latents mean: {latents.mean():.4f}")
+    print(f"Latents std: {latents.std():.4f}")
+    print(f"PC1 variance explained BEFORE clustering: {PCA(n_components=1).fit(latents).explained_variance_ratio_[0]*100:.1f}%")
     # --- Latent Dimensionality Reduction ---
     if reduce_latent_95:
         reducer_95 = PCA(n_components=0.95, random_state=random_state)

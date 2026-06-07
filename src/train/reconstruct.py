@@ -1,218 +1,257 @@
-import torch
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
-from src.train.train import ConvAutoencoder  
-import argparse
+"""
+reconstruct.py
+──────────────
+Visualise MAE / CAE reconstructions from a trained checkpoint.
+
+Snakemake call (example):
+    python src/train/reconstruct.py \
+        --autoencoder_model mae \
+        --input  data/processed_wac_100m_new/sigma/100/craters_aug.dat \
+        --model  logs/mae/.../models/autoencoder.pth \
+        --device cpu \
+        --file_out logs/mae/.../models/reconstructions.png \
+        --num_images 8 \
+        --mask_ratio 0.75
+"""
+
 import os
-from transformers import ViTMAEForPreTraining
-import torch.nn.functional as F
-from src.helper_functions import *
 import sys
-sys.path.append(os.path.abspath("src/models/mae"))
-from src.models.mae.models_mae import *
+import argparse
+import numpy as np
+import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+sys.path.append(os.path.abspath("."))
+sys.path.append(os.path.abspath("src/models/mae"))   # needed for util.pos_embed
+from src.models.autoencoder import ConvAutoencoder
+from src.models.mae.models_mae import MaskedAutoencoderViT
 
 
-def save_reconstructions(model_path, npy_path, autoencoder_model="cae",
-                         device="cpu",latent_dim=6 , filename="models/reconstructions.png", num_images=8, freeze_until=-2, pretrained_model='facebook/vit-mae-large', mask_ratio=0.75):
-    seed = 42
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-    if autoencoder_model == "cae":
-        # Load data
-        file_size = os.path.getsize(npy_path)
-        N = file_size // (224 * 224 * 1 * 4)
-        craters = np.memmap(
-            npy_path,
-            dtype=np.float32,
-            mode="r",
-            shape=(N, 1, 224, 224)
-        )
-
-        rng = np.random.default_rng(seed)
-        sample_indices = rng.choice(len(craters), size=num_images, replace=False)
-        craters_subset = craters[sample_indices]
-
-        dataset = TensorDataset(torch.from_numpy(craters_subset))
-        loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
-
-        model = ConvAutoencoder(latent_dim=latent_dim).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
-
-        model.to(device)
-        model.eval()
-
-        # Take a batch
-        inputs = next(iter(loader))[0].to(device)
-        with torch.no_grad():
-            outputs = model(inputs)
-
-        # Plot originals and reconstructions
-        fig, axes = plt.subplots(2, num_images, figsize=(num_images*2, 4))
-        fig.suptitle(f"Original Images and Reconstructions ({autoencoder_model.upper()})", fontsize=16)
-        
-        for i in range(num_images):
-            axes[0, i].imshow(inputs[i].cpu().squeeze(), cmap="gray")
-            axes[1, i].imshow(outputs[i].cpu().squeeze(), cmap="gray")
-            axes[0, i].axis("off")
-            axes[1, i].axis("off")
-
-        plt.tight_layout()
-        plt.savefig(filename)
-        plt.close()
-    
-    if autoencoder_model == "mae":
-
-        # Load data
-        file_size = os.path.getsize(npy_path)
-        N = file_size // (224 * 224 * 3 * 4)
-        craters = np.memmap(
-            npy_path,
-            dtype=np.float32,
-            mode="r",
-            shape=(N, 3, 224, 224)
-        )
-
-        rng = np.random.default_rng(seed)
-        sample_indices = rng.choice(len(craters), size=num_images, replace=False)
-        craters_subset = craters[sample_indices]
-
-        dataset = TensorDataset(torch.from_numpy(craters_subset))
-        loader = DataLoader(dataset, batch_size=num_images, shuffle=True)
-
-        # Load pretrained MAE
-        model = mae_vit_base_patch16()
-
-        try:
-            state_dict = torch.load(model_path, map_location="cpu")
-            msg = model.load_state_dict(state_dict)
-            print(f"Successfully loaded MAE model weights from {model_path}")
-            print(f"Loaded pretrained MAE weights: {msg}")
-
-        except Exception as e:
-            print(f"Error loading state_dict for MAE model: {e}")
-            return
-
-        model.to(device) 
-        model.eval()
-
-        # Take a batch
-        inputs = next(iter(loader))[0].to(device)
-
-        with torch.no_grad():
-            torch.manual_seed(42)
-            _ , pred, mask = model(inputs, mask_ratio)
-
-        print("pred shape:", pred.shape)
-        print("mask shape:", mask.shape)
-        print("patch size:", model.patch_embed.patch_size)
-
-        # reconstruct images from patch logits
-
-        recon = model.unpatchify(pred)
-
-        # De-normalize
-        mean = torch.tensor([0.27261323, 0.27261323, 0.27261323], device=device).view(1, 3, 1, 1)
-        std = torch.tensor([0.0973839, 0.0973839, 0.0973839], device=device).view(1, 3, 1, 1)
-
-        recon = recon * std + mean
-        inputs = inputs * std + mean
-
-        # Clamp
-        recon = recon.clamp(0, 1)
-        inputs = inputs.clamp(0, 1)
-
-        # Create mask image
-        mask_img = unpatchify_mask(mask.cpu().numpy())  # (B, 1, H, W)
-
-        # DEBUG: Check mask_img values
-        print(f"mask_img shape: {mask_img.shape}")
-        print(f"mask_img unique: {np.unique(mask_img)}")
-        print(f"mask_img mean: {mask_img.mean()}")
-
-        masked_recon = recon.clone()
-        for i in range(len(masked_recon)):
-            # mask_img[i] is already a tensor, shape (1, H, W)
-            mask_single = mask_img[i]  # (1, 224, 224)
-            
-            # Repeat to 3 channels: (3, 224, 224)
-            mask_3ch = mask_single.repeat(3, 1, 1)
-            
-            # Where mask==0 (visible), set to gray (0.5)
-            masked_recon[i] = torch.where(
-                mask_3ch > 0.5,
-                masked_recon[i],  # Keep reconstruction for masked patches
-                torch.full_like(masked_recon[i], 0.5)  # Gray out visible patches
-            )
-
-        fig, axes = plt.subplots(5, num_images, figsize=(num_images*2, 10))  # 5 rows now
-        fig.suptitle("MAE Reconstruction Analysis", fontsize=14)
-
-        for i in range(num_images):
-            orig_img = inputs[i].cpu().permute(1, 2, 0).numpy()[:, :, 0]
-            recon_img = recon[i].cpu().permute(1, 2, 0).numpy()[:, :, 0]
-            masked_recon_img = masked_recon[i].cpu().permute(1, 2, 0).numpy()[:, :, 0]
-            
-            # Row 0: Original
-            axes[0, i].imshow(orig_img, cmap="gray")
-            axes[0, i].set_title("Original", fontsize=9)
-            axes[0, i].axis("off")
-
-            # Row 1: Full Reconstruction
-            axes[1, i].imshow(recon_img, cmap="gray")
-            axes[1, i].set_title("Full Recon", fontsize=9)
-            axes[1, i].axis("off")
-
-            # Row 2: ONLY Masked Reconstructions (visible = gray)
-            axes[2, i].imshow(masked_recon_img, cmap="gray")
-            axes[2, i].set_title("Masked Only", fontsize=9)
-            axes[2, i].axis("off")
-
-            # Row 3: Mask overlay
-            axes[3, i].imshow(orig_img, cmap="gray")
-            axes[3, i].imshow(mask_img[i, 0].cpu().numpy(), cmap="Reds", alpha=0.3)
-            axes[3, i].set_title("Masked Patches", fontsize=9)
-            axes[3, i].axis("off")
-
-            # Row 4: Composite
-            mask_img_bw = mask_img[i, 0].cpu().numpy()
-            composite_img = np.where(mask_img_bw > 0.5, recon_img, orig_img)
-            axes[4, i].imshow(composite_img, cmap="gray")
-            axes[4, i].set_title("Composite", fontsize=9)
-            axes[4, i].axis("off")
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(filename)
-        plt.close()
-
-    
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--autoencoder_model', type=str, choices=['cae','mae'], default='cae')
-    parser.add_argument('--input', required=True, help="Path to crater npy file")
-    parser.add_argument('--model', required=True, help="Path to trained model")
-    parser.add_argument('--device', default="cpu", help="Device to run the model on")
-    parser.add_argument('--latent_dim', type=int, default=6, help="Dimensionality of the latent space")
-    parser.add_argument('--file_outq', default="models/reconstructions.png", help="Path to save the reconstruction image")
-    parser.add_argument('--num_images', type=int, default=8, help="Number of images to reconstruct and display")
-    parser.add_argument('--freeze_until', type=int, default=2, help="For MAE: number of encoder transformer blocks to freeze from the end (negative number)") 
-    parser.add_argument('--pretrained_model', type=str, default='facebook/vit-mae-large', help="Pretrained model name for MAE")
-    parser.add_argument('--mask_ratio', type=float, default=0.75, help="Masking ratio for MAE reconstruction")  
-    args = parser.parse_args()
+# ── architecture (must mirror train.py exactly) ───────────────────────────────
+MAE_KWARGS = dict(
+    img_size=128,
+    patch_size=8,
+    in_chans=1,
+    norm_pix_loss=True,
+    embed_dim=768,
+    depth=12,
+    num_heads=12,
+    decoder_embed_dim=512,
+    decoder_depth=8,
+    decoder_num_heads=16,
+    mlp_ratio=4.0,
+)
 
 
-    save_reconstructions(
-        model_path=args.model,
-        npy_path=args.input,
-        device=args.device,
-        filename=args.file_outq,
-        latent_dim=args.latent_dim,
-        num_images=args.num_images,
-        freeze_until=args.freeze_until,
-        autoencoder_model=args.autoencoder_model,
-        pretrained_model=args.pretrained_model,
-        mask_ratio=args.mask_ratio
+# ── memmap loader (mirrors train.py) ─────────────────────────────────────────
+def load_memmap(path: str, num_channels: int) -> np.memmap:
+    file_size    = os.path.getsize(path)
+    total_floats = file_size // 4
+    for size in [128]:
+        if total_floats % (num_channels * size * size) == 0:
+            N = total_floats // (num_channels * size * size)
+            print(f"  Memmap shape: ({N}, {num_channels}, {size}, {size})")
+            return np.memmap(path, dtype=np.float32, mode="r",
+                             shape=(N, num_channels, size, size))
+    raise ValueError(
+        f"Cannot infer shape from {path} "
+        f"({total_floats} floats, {num_channels} channel(s))."
     )
+
+
+# ── MAE helpers ───────────────────────────────────────────────────────────────
+
+def unpatchify(model: MaskedAutoencoderViT,
+               pred: torch.Tensor) -> torch.Tensor:
+    """(B, n_patches, patch²·C) → (B, C, H, W)  using the model's own method."""
+    return model.unpatchify(pred)          # built into MaskedAutoencoderViT
+
+
+def make_masked_image(model: MaskedAutoencoderViT,
+                      imgs: torch.Tensor,
+                      mask: torch.Tensor) -> torch.Tensor:
+    """
+    Replace masked patches with 0.5 (mid-grey) so the viewer can see
+    which regions the model had to reconstruct.
+    mask: (B, n_patches)  1 = masked, 0 = visible
+    """
+    B, C, H, W = imgs.shape
+    p          = model.patch_embed.patch_size[0]   # patch size
+    h = w      = H // p                            # patches per side
+
+    # expand mask to pixel space: (B, n_patches) → (B, C, H, W)
+    mask_pixel = mask.reshape(B, h, w)              # (B, h, w)
+    mask_pixel = mask_pixel.unsqueeze(1)            # (B, 1, h, w)
+    mask_pixel = mask_pixel.repeat_interleave(p, dim=2).repeat_interleave(p, dim=3)
+    mask_pixel = mask_pixel.expand_as(imgs)         # (B, C, H, W)
+
+    masked = imgs.clone()
+    masked[mask_pixel == 1] = 0.5
+    return masked
+
+
+# ── plotting ──────────────────────────────────────────────────────────────────
+
+def plot_reconstructions(
+    originals:      np.ndarray,   # (N, H, W)  float32 [0,1]
+    masked_inputs:  np.ndarray,   # (N, H, W)
+    reconstructions: np.ndarray,  # (N, H, W)
+    save_path: str,
+    model_type: str,
+):
+    N    = len(originals)
+    rows = 3 if model_type == "mae" else 2
+    labels = (["Original", "Masked input", "Reconstruction"]
+              if model_type == "mae"
+              else ["Original", "Reconstruction"])
+
+    fig, axes = plt.subplots(rows, N, figsize=(2.2 * N, 2.5 * rows),
+                             facecolor="#0d1117")
+
+    grids = [originals, masked_inputs, reconstructions] if rows == 3 \
+            else [originals, reconstructions]
+
+    for r, (row_imgs, label) in enumerate(zip(grids, labels)):
+        for c in range(N):
+            ax = axes[r, c]
+            ax.imshow(row_imgs[c], cmap="gray", vmin=0, vmax=1,
+                      interpolation="nearest")
+            ax.axis("off")
+            if c == 0:
+                ax.set_ylabel(label, color="white", fontsize=9,
+                              rotation=0, labelpad=55, va="center")
+
+    fig.suptitle("Crater reconstructions", color="#e6edf3", fontsize=13)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=140, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close()
+    print(f"✅  Saved → {save_path}")
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main(args):
+    device       = torch.device(args.device)
+    num_channels = 1
+
+    # ── load data ─────────────────────────────────────────────────────────
+    print(f"Loading data : {args.input}")
+    data = load_memmap(args.input, num_channels)
+
+    # pull held-out samples only (never seen in training)
+    split_dir = os.path.dirname(args.model)
+    pool_name = f"{args.split}_idx.npy"
+    pool_path = os.path.join(split_dir, pool_name)
+
+    if os.path.exists(pool_path):
+        pool = np.load(pool_path)
+        # test pool can be empty if num_samples was None → fall back to val
+        if len(pool) == 0 and args.split == "test":
+            print("  Test pool empty (num_samples was None); falling back to val.")
+            pool = np.load(os.path.join(split_dir, "val_idx.npy"))
+        print(f"  Sampling from '{args.split}' pool ({len(pool)} held-out images)")
+    else:
+        raise FileNotFoundError(
+            f"{pool_path} not found. Re-run training to save split indices, "
+            f"or point --model at the checkpoint dir that has *_idx.npy."
+        )
+
+    n_pick  = min(args.num_images, len(pool))
+    pick    = np.random.default_rng(0).choice(pool, n_pick, replace=False)
+    imgs_np = data[pick].copy()                          # (N, 1, H, W)
+    imgs    = torch.from_numpy(imgs_np).to(device)
+
+    # ── build model ───────────────────────────────────────────────────────
+    print(f"Building model : {args.autoencoder_model}")
+    if args.autoencoder_model == "cae":
+        model = ConvAutoencoder(latent_dim=args.latent_dim).to(device)
+    else:
+        model = MaskedAutoencoderViT(**MAE_KWARGS).to(device)
+
+    # ── load weights ──────────────────────────────────────────────────────
+    print(f"Loading weights: {args.model}")
+    state = torch.load(args.model, map_location=device)
+
+    # validate key shapes before loading
+    if args.autoencoder_model == "mae":
+        ckpt_pos = state.get("pos_embed", state.get("module.pos_embed"))
+        if ckpt_pos is not None:
+            model_pos = model.pos_embed
+            if ckpt_pos.shape != model_pos.shape:
+                raise ValueError(
+                    f"pos_embed shape mismatch:\n"
+                    f"  checkpoint : {ckpt_pos.shape}\n"
+                    f"  model      : {model_pos.shape}\n"
+                    f"Check that img_size and patch_size in MAE_KWARGS "
+                    f"match the training configuration."
+                )
+
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    print("  Weights loaded ✅")
+
+    # ── inference ─────────────────────────────────────────────────────────
+    with torch.no_grad():
+        if args.autoencoder_model == "cae":
+            recon = model(imgs).cpu().numpy()            # (N, 1, H, W)
+            originals       = imgs_np[:, 0]              # (N, H, W)
+            masked_inputs   = None
+            reconstructions = recon[:, 0]
+
+        else:  # mae
+            # forward returns (loss, pred, mask, latent)
+            # pred : (B, n_patches, patch²·C)  — normalized per patch when norm_pix_loss=True
+            # mask : (B, n_patches)  1=masked
+            _, pred, mask, _ = model(imgs, mask_ratio=args.mask_ratio)
+
+            # ── denormalize pred (reverses norm_pix_loss normalization) ──
+            # model.patchify: (B,C,H,W) → (B, n_patches, patch²·C)
+            patches = model.patchify(imgs)               # original patches
+            mean    = patches.mean(dim=-1, keepdim=True)
+            var     = patches.var(dim=-1,  keepdim=True)
+            pred_denorm = pred * (var + 1e-6).sqrt() + mean
+
+            recon  = unpatchify(model, pred_denorm).cpu()  # (N, 1, H, W)
+            masked = make_masked_image(model, imgs.cpu(), mask.cpu())
+
+            originals       = imgs_np[:, 0]
+            masked_inputs   = masked.numpy()[:, 0]
+            reconstructions = recon.numpy()[:, 0]
+
+    # ── clip to [0, 1] (norm_pix_loss can produce values outside) ─────────
+    reconstructions = np.clip(reconstructions, 0, 1)
+
+    # ── plot ──────────────────────────────────────────────────────────────
+    plot_reconstructions(
+        originals, masked_inputs, reconstructions,
+        save_path=args.file_out,
+        model_type=args.autoencoder_model,
+    )
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Visualise crater reconstructions from a trained MAE / CAE"
+    )
+    parser.add_argument("--autoencoder_model", choices=["cae", "mae"], default="mae")
+    parser.add_argument("--input",      required=True,
+                        help="Path to .dat memmap (clean or augmented)")
+    parser.add_argument("--model",      required=True,
+                        help="Path to saved .pth checkpoint")
+    parser.add_argument("--file_out",   required=True,
+                        help="Output PNG path")
+    parser.add_argument("--device",     default="cuda",
+                        help="'cuda' or 'cpu'")
+    parser.add_argument("--num_images", type=int,   default=8,
+                        help="Number of examples to visualise")
+    parser.add_argument("--mask_ratio", type=float, default=0.75,
+                        help="MAE mask ratio (must match training)")
+    parser.add_argument("--latent_dim", type=int,   default=64,
+                        help="CAE latent dim (ignored for MAE)")
+    args = parser.parse_args()
+    main(args)

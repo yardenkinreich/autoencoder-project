@@ -1,295 +1,276 @@
+"""
+latent_space.py
+───────────────
+Encode craters into latent space and visualise with PCA / t-SNE.
+
+Usage:
+    python src/train/latent_space.py encode   --imgs-dir ...  --model ... --autoencoder-model mae ...
+    python src/train/latent_space.py plot-dots --latents ...  --states ... --out-png ...
+    python src/train/latent_space.py plot-imgs --latents ...  --imgs-dir ... --out-png ...
+"""
+
 import os
+import sys
 import argparse
-import torch
 import numpy as np
+import torch
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from PIL import Image
+
+sys.path.append(os.path.abspath("."))
+sys.path.append(os.path.abspath("src/models/mae"))   # for util.pos_embed
 from src.models.autoencoder import ConvAutoencoder
-from src.helper_functions import *
-from torch.utils.data import DataLoader, TensorDataset
-import torch.nn.functional as F
-import sys
-sys.path.append(os.path.abspath("src/models/mae"))
-from src.models.mae.models_mae import *
-#from src.models.mae import MAEWithBottleneck
+from src.models.mae.models_mae import MaskedAutoencoderViT
 
-STATE_LABELS = {
-    1: "New Crater",
-    2: "Semi New Crater",
-    3: "Semi Old Crater",
-    4: "Old Crater"
-}
-STATE_COLORS = {
-    1: "tab:blue",
-    2: "tab:green",
-    3: "tab:orange",
-    4: "tab:red"
-}
+# ── architecture — must mirror train.py exactly ───────────────────────────────
+INPUT_SIZE = 128      # ← was 224; matches OUTPUT_SIZE in preprocess.py
 
-def normalize_image_to_crater_stats(img_path):
-    """
-    Normalize crater images using the statistics from your training data
-    """
-    # Load grayscale image
-    img = Image.open(img_path).convert("L")
+MAE_KWARGS = dict(
+    img_size=128,
+    patch_size=8,     # ← was 16; matches train.py
+    in_chans=1,
+    norm_pix_loss=True,
+    embed_dim=768,
+    depth=12,
+    num_heads=12,
+    decoder_embed_dim=512,
+    decoder_depth=8,
+    decoder_num_heads=16,
+    mlp_ratio=4.0,
+)
 
-    img = img.resize((224, 224))
-
-    img_array = np.array(img, dtype=np.float32) / 255.0
-    
-    # Replicate to 3 channels
-    img_3ch = np.stack([img_array, img_array, img_array], axis=0)  # (3, 224, 224)
-    
-    # Normalize with crater dataset statistics
-    mean = np.array([0.27261323, 0.27261323, 0.27261323]).reshape(3, 1, 1)
-    std = np.array([0.0973839, 0.0973839, 0.0973839]).reshape(3, 1, 1)
-    
-    img_normalized = (img_3ch - mean) / std
-    
-    return torch.from_numpy(img_normalized)
-
-def load_images(imgs_dir):
-    files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
-    states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
-
-    if args.autoencoder_model == 'cae':
-        imgs_list = []
-        for f in files:
-            img_path = os.path.join(imgs_dir, f)
-            
-            # Load grayscale image
-            img = Image.open(img_path).convert("L")
-            img = img.resize((224, 224))
-            img_array = np.array(img, dtype=np.float32) / 255.0
-            
-            # Apply flip_crater
-            img_array = flip_crater(img_array).copy()
-
-            # Convert to tensor and add channel dimension
-            imgs_list.append(torch.from_numpy(img_array).unsqueeze(0))  # shape (1, 224, 224)
-                
-        # Stack all images into a single tensor
-        imgs = torch.stack(imgs_list).float()  # shape (N, 1, 224, 224)
-
-    elif args.autoencoder_model == 'mae':
-        imgs_list = []
-        for f in files:
-            img_path = os.path.join(imgs_dir, f)
-            
-            # Load grayscale image
-            img = Image.open(img_path).convert("L")
-            img = img.resize((224, 224))
-            img_array = np.array(img, dtype=np.float32) / 255.0
-            
-            # Apply flip_crater
-            img_array = flip_crater(img_array)
-            
-            # Replicate to 3 channels
-            img_3ch = np.stack([img_array, img_array, img_array], axis=0)  # (3, 224, 224)
-            '''
-            # Normalize with crater dataset statistics
-            mean = np.array([0.27261323, 0.27261323, 0.27261323]).reshape(3, 1, 1)
-            std = np.array([0.0973839, 0.0973839, 0.0973839]).reshape(3, 1, 1)
-            
-            img_3ch = (img_3ch - mean) / std
-            '''
-            imgs_list.append(torch.from_numpy(img_3ch))
-                
-        imgs = torch.stack(imgs_list).float()
-    
-    return imgs, states, files  # Returns (N, C, H, W) Tensor
+STATE_LABELS = {1: "New Crater", 2: "Semi New Crater",
+                3: "Semi Old Crater", 4: "Old Crater"}
+STATE_COLORS = {1: "tab:blue", 2: "tab:green",
+                3: "tab:orange", 4: "tab:red"}
 
 
+# ── model builder ─────────────────────────────────────────────────────────────
 
-def encode_images(inputs, model_path, bottleneck, device, out_latents, 
-out_states, states = None,mask_ratio=0.75, freeze_until=-2,autoencoder_model="mae", pretrained_model='facebook/vit-mae-large',is_dataloader=False):
-
-    if autoencoder_model == 'cae':
+def build_model(autoencoder_model: str, bottleneck: int,
+                model_path: str, device: torch.device):
+    if autoencoder_model == "cae":
         model = ConvAutoencoder(latent_dim=bottleneck)
         model.load_state_dict(torch.load(model_path, map_location=device))
-        encoder = model.encoder.to(device).eval()
+        model.to(device).eval()
+        return model
 
-        inputs = inputs.to(device)
+    # mae
+    model = MaskedAutoencoderViT(**MAE_KWARGS)
+    state = torch.load(model_path, map_location=device)
+    msg   = model.load_state_dict(state, strict=True)
+    print(f"  MAE weights loaded: {msg}")
+    model.to(device).eval()
+    return model
+
+
+# ── encoding helpers ──────────────────────────────────────────────────────────
+
+def _encode_mae_batch(model: MaskedAutoencoderViT,
+                      imgs: torch.Tensor) -> torch.Tensor:
+    """
+    Extract a fixed-size latent vector from the MAE encoder.
+
+    Uses mask_ratio=0 (no masking) so every patch is visible —
+    giving a deterministic, stable representation for clustering.
+    The CLS token is used as the latent vector (index 0 of encoder output).
+    If encode_cluster() exists on the model we use it; otherwise we fall
+    back to the standard forward_encoder path.
+    """
+    if hasattr(model, "encode_cluster"):
+        return model.encode_cluster(imgs)
+
+    # fallback: run encoder with no masking, take CLS token
+    with torch.no_grad():
+        latent, _, _ = model.forward_encoder(imgs, mask_ratio=0.0)
+    return latent[:, 1:, :].mean(dim=1)  
+
+
+def _encode_cae_batch(model: ConvAutoencoder,
+                      imgs: torch.Tensor) -> torch.Tensor:
+    with torch.no_grad():
+        return model.encoder(imgs)
+
+
+# ── data loaders ──────────────────────────────────────────────────────────────
+
+def load_images(imgs_dir: str) -> tuple:
+    """Load Julie's PNG dataset, resize to INPUT_SIZE (128)."""
+    files  = sorted(f for f in os.listdir(imgs_dir) if f.endswith(".png"))
+    states = np.array([int(f.split("_")[1].split(".")[0]) for f in files])
+
+    imgs_list = []
+    for f in files:
+        img = Image.open(os.path.join(imgs_dir, f)).convert("L")
+        img = img.resize((INPUT_SIZE, INPUT_SIZE))
+        arr = np.array(img, dtype=np.float32) / 255.0
+        imgs_list.append(torch.from_numpy(arr).unsqueeze(0))   # (1, H, W)
+
+    imgs = torch.stack(imgs_list).float()   # (N, 1, H, W)
+    return imgs, states, files
+
+
+# ── encode entry point ────────────────────────────────────────────────────────
+
+def encode_images(
+    inputs,            # (N,1,H,W) tensor  OR  a DataLoader
+    model_path: str,
+    bottleneck: int,
+    device: torch.device,
+    out_latents: str,
+    out_states: str,
+    states=None,
+    autoencoder_model: str = "mae",
+    is_dataloader: bool = False,
+):
+    model   = build_model(autoencoder_model, bottleneck, model_path, device)
+    encode  = _encode_mae_batch if autoencoder_model == "mae" else _encode_cae_batch
+
+    if is_dataloader:
+        latents_list = []
+        n = len(inputs)
         with torch.no_grad():
-            latents = encoder(inputs).cpu().numpy()
-
-        np.save(out_latents, latents)
-        np.save(out_states, states)
-        print(f"Saved latents to {out_latents}, states to {out_states}")
-    
-    elif autoencoder_model == 'mae':
-        # Load pretrained MAE
-        model = mae_vit_base_patch16()
-
-        try:
-            state_dict = torch.load(model_path, map_location="cpu")
-            msg = model.load_state_dict(state_dict, strict=False) # strict=False is often safer for MAE fine-tuning
-            print(f"Successfully loaded MAE model weights from {model_path}")
-
-        except Exception as e:
-            print(f"Error loading state_dict for MAE model: {e}")
-            return
-
-        model.to(device) # Move model to GPU
-        model.eval()
-        
-        if is_dataloader:
-            latents_list = []
-            with torch.no_grad():
-                for i, batch in enumerate(inputs):
-                    if i % 100 == 0:
-                        print(f"Processing batch {i}/{len(inputs)}")
-                    
-                    x = batch.to(device)
-                    z, _, _ = model.forward_encoder(x, mask_ratio=0)
-                    latents_list.append(z[:, 0, :].cpu())
-            
-            latents = torch.cat(latents_list, dim=0).numpy()
-        else:
-            # Single tensor path
-            inputs = inputs.to(device)
-            with torch.no_grad():
-                z, _, _ = model.forward_encoder(inputs, mask_ratio=0)
-                latents = z[:, 0, :].cpu().numpy()
-
-        np.save(out_latents, latents)
-        if states is not None:
-            np.save(out_states, states)
-        print(f"Saved latents to {out_latents}")
-
-
-
-def plot_dots(latents_path, states_path, out_png, technique, model_name):
-    latents = np.load(latents_path)
-    states = np.load(states_path).squeeze()
-
-    if technique == "pca":
-        pca = PCA(n_components=2)
-        coords = pca.fit_transform(latents)
-
-        x_axis, y_axis = coords[:, 0], coords[:, 1]
-
-        explained_var = pca.explained_variance_ratio_
-        x_label = f"PC1 ({explained_var[0]*100:.1f}% variance)"
-        y_label = f"PC2 ({explained_var[1]*100:.1f}% variance)"
-
-        total_var = explained_var.sum() * 100
-        print(f"[PCA] Total variance explained (PC1+PC2): {total_var:.2f}%")
-
-        fig, ax = plt.subplots(figsize=(10, 7))
-
-    elif technique == "tsne":
-        coords = TSNE(n_components=2).fit_transform(latents)
-        x_axis, y_axis = coords[:, 0], coords[:, 1]
-
-        x_label = "t-SNE Component 1"
-        y_label = "t-SNE Component 2"
-
-        fig, ax = plt.subplots(figsize=(10, 7))
-
+            for i, batch in enumerate(inputs):
+                if i % 100 == 0:
+                    print(f"  Batch {i}/{n}")
+                x = batch[0] if isinstance(batch, (list, tuple)) else batch
+                latents_list.append(encode(model, x.to(device)).cpu())
+        latents = torch.cat(latents_list, dim=0).numpy()
     else:
-        raise ValueError(f"Unknown technique {technique}")
+        with torch.no_grad():
+            latents = encode(model, inputs.to(device)).cpu().numpy()
 
-    ax.set_title(
-        f"{technique.upper()} Projection of Latent Space "
-        f"Colored by Ground-Truth Deformation State"
-    )
+    os.makedirs(os.path.dirname(out_latents) or ".", exist_ok=True)
+    np.save(out_latents, latents)
+    if states is not None:
+        np.save(out_states, states)
+    print(f"  Latents saved → {out_latents}  shape={latents.shape}")
 
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
+
+# ── dimensionality reduction ──────────────────────────────────────────────────
+
+def _reduce(latents: np.ndarray, technique: str):
+    if technique == "pca":
+        pca    = PCA(n_components=2)
+        coords = pca.fit_transform(latents)
+        ev     = pca.explained_variance_ratio_
+        xlabel = f"PC1 ({ev[0]*100:.1f}%)"
+        ylabel = f"PC2 ({ev[1]*100:.1f}%)"
+        print(f"[PCA] Variance explained: {ev.sum()*100:.2f}%")
+    elif technique == "tsne":
+        coords = TSNE(n_components=2, random_state=42).fit_transform(latents)
+        xlabel, ylabel = "t-SNE 1", "t-SNE 2"
+    else:
+        raise ValueError(f"Unknown technique: {technique}")
+    return coords, xlabel, ylabel
+
+
+# ── plots ─────────────────────────────────────────────────────────────────────
+
+def plot_dots(latents_path: str, states_path: str,
+              out_png: str, technique: str, model_name: str):
+    latents = np.load(latents_path)
+    states  = np.load(states_path).squeeze()
+    coords, xlabel, ylabel = _reduce(latents, technique)
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.set_title(f"{technique.upper()} — Latent Space coloured by Deformation State\n{model_name}")
+    ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
 
     for s in np.unique(states):
         mask = states == s
-        ax.scatter(
-            x_axis[mask],
-            y_axis[mask],
-            label=STATE_LABELS.get(s, f"state {s}"),
-            c=STATE_COLORS.get(s, "gray"),
-            alpha=0.7,
-            s=20,
-        )
-
+        ax.scatter(coords[mask, 0], coords[mask, 1],
+                   label=STATE_LABELS.get(s, f"state {s}"),
+                   c=STATE_COLORS.get(s, "gray"),
+                   alpha=0.7, s=20)
     ax.legend()
     plt.tight_layout()
-
-    os.makedirs(os.path.dirname(out_png), exist_ok=True)
-    print(f"Saving plot to {out_png}")
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
     fig.savefig(out_png, dpi=200)
     plt.close(fig)
+    print(f"  Saved → {out_png}")
 
 
-def plot_imgs(latents_path, imgs_dir, out_png, technique, model_name):
+def plot_imgs(latents_path: str, imgs_dir: str,
+              out_png: str, technique: str, model_name: str):
     latents = np.load(latents_path)
+    coords, xlabel, ylabel = _reduce(latents, technique)
 
-    if technique == "pca":
-        coords = PCA(n_components=2).fit_transform(latents)
-    elif technique == "tsne":
-        coords = TSNE(n_components=2).fit_transform(latents)
-
-    files = sorted([f for f in os.listdir(imgs_dir) if f.endswith(".png")])
+    files = sorted(f for f in os.listdir(imgs_dir) if f.endswith(".png"))
+    assert len(files) == len(latents), (
+        f"Mismatch: {len(files)} images vs {len(latents)} latents"
+    )
 
     fig, ax = plt.subplots(figsize=(12, 10))
-    ax.set_title(f"{technique} on {model_name} Latent Image Clustering")
-    ax.set_xlabel(f"{technique} Component 1")
-    ax.set_ylabel(f"{technique} Component 2")
+    ax.set_title(f"{technique.upper()} — {model_name} latent image clustering")
+    ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
 
     for (x, y), fname in zip(coords, files):
         img = Image.open(os.path.join(imgs_dir, fname)).convert("L")
-        im = OffsetImage(img, zoom=0.2, cmap="gray")
-        ab = AnnotationBbox(im, (x, y), frameon=False)
+        ab  = AnnotationBbox(OffsetImage(img, zoom=0.2, cmap="gray"),
+                             (x, y), frameon=False)
         ax.add_artist(ab)
+
     ax.update_datalim(coords)
     ax.autoscale()
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
     plt.savefig(out_png, dpi=200)
     plt.close(fig)
+    print(f"  Saved → {out_png}")
 
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="command")
+    sub    = parser.add_subparsers(dest="command")
 
     # encode
-    enc = subparsers.add_parser("encode")
-    enc.add_argument("--imgs-dir", required=True)
-    enc.add_argument("--model", required=True)
-    enc.add_argument("--autoencoder-model", choices=["cae", "mae"], default="cae", required=True)
-    enc.add_argument("--bottleneck", type=int, default=6)
-    enc.add_argument("--out-latents", required=True)
-    enc.add_argument("--out-states", required=True)
-    enc.add_argument("--freeze-until", type=int, default=-2)
-    enc.add_argument("--pretrained-model", type=str, default='facebook/vit-mae-large')
-    enc.add_argument("--mask-ratio", type=float, default=0.75)
+    enc = sub.add_parser("encode")
+    enc.add_argument("--imgs-dir",          required=True)
+    enc.add_argument("--model",             required=True)
+    enc.add_argument("--autoencoder-model", choices=["cae", "mae"], required=True)
+    enc.add_argument("--bottleneck",        type=int,   default=6)
+    enc.add_argument("--out-latents",       required=True)
+    enc.add_argument("--out-states",        required=True)
 
-    # plot dots
-    dots = subparsers.add_parser("plot-dots")
-    dots.add_argument("--latents", required=True)
-    dots.add_argument("--states", required=True)
-    dots.add_argument("--out-png", required=True)
-    dots.add_argument("--technique", choices=["pca", "tsne"], default="pca")
+    # plot-dots
+    dots = sub.add_parser("plot-dots")
+    dots.add_argument("--latents",    required=True)
+    dots.add_argument("--states",     required=True)
+    dots.add_argument("--out-png",    required=True)
+    dots.add_argument("--technique",  choices=["pca", "tsne"], default="pca")
     dots.add_argument("--model-name", required=True)
 
-    # plot imgs
-    imgs = subparsers.add_parser("plot-imgs")
-    imgs.add_argument("--latents", required=True)
-    imgs.add_argument("--imgs-dir", required=True)
-    imgs.add_argument("--out-png", required=True)
-    imgs.add_argument("--technique", choices=["pca", "tsne"], default="pca")
+    # plot-imgs
+    imgs = sub.add_parser("plot-imgs")
+    imgs.add_argument("--latents",    required=True)
+    imgs.add_argument("--imgs-dir",   required=True)
+    imgs.add_argument("--out-png",    required=True)
+    imgs.add_argument("--technique",  choices=["pca", "tsne"], default="pca")
     imgs.add_argument("--model-name", required=True)
 
-    args = parser.parse_args()
+    args   = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.command == "encode":
         inputs, states, _ = load_images(args.imgs_dir)
         encode_images(inputs, args.model, args.bottleneck, device,
-                      args.out_latents, args.out_states, states,args.mask_ratio, args.freeze_until, args.autoencoder_model, args.pretrained_model)
+                      args.out_latents, args.out_states, states,
+                      autoencoder_model=args.autoencoder_model)
+
     elif args.command == "plot-dots":
-        plot_dots(args.latents, args.states, args.out_png, args.technique, args.model_name)
+        plot_dots(args.latents, args.states, args.out_png,
+                  args.technique, args.model_name)
+
     elif args.command == "plot-imgs":
-        plot_imgs(args.latents, args.imgs_dir, args.out_png, args.technique, args.model_name)
+        plot_imgs(args.latents, args.imgs_dir, args.out_png,
+                  args.technique, args.model_name)
+
     else:
         parser.print_help()
-

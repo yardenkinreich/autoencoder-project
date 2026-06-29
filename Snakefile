@@ -226,8 +226,8 @@ rule plot_latent_imgs:
 rule display_clusters:
     input:
         model    = f"{MODELS_DIR}/autoencoder.pth",
-        dataset  = f"data/processed_wac_100m_new/sigma/100/craters_clean.dat",
-        metadata = f"data/processed_wac_100m_new/sigma/100/metadata.csv"
+        dataset  = f"data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_aug.dat",
+        metadata = f"data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/metadata.csv"
     output:
         df             = f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv",
         clustering_png = f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.png"

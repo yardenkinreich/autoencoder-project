@@ -1,0 +1,18 @@
+# Julie's labeled set spans 3 ordinal states (2,3,4); no fresh/New craters.
+# Filenames: <crater_id>_<state>.png. EVAL maps states 2,3,4 -> ordinal 0,1,2.
+# Training still clusters the FULL population into 4; n_clusters=3 here is for
+# the clean 3-way Hungarian recovery test on Julie's subset only.
+class_names: ["Semi-New", "Semi-Old", "Old"]
+n_clusters: 3
+seed: 0
+latent_dim: 768          # MAE embed_dim; only used by the synthetic fallback
+
+# real-pipeline inputs (consumed in pipeline.embed):
+checkpoint: "models/autoencoder.pth"        # MAE retrained on GLOBAL scaling
+imgs_dir:  "data/raw/craters_for_danny"     # Julie's labeled PNGs
+scaling_json: "configs/global_scaling.json" # frozen (lo,hi) from fit_global_scaling.py
+png_max: 255                                # 8-bit PNG ceiling
+
+# preprocessing is GLOBAL percentile scaling (clip to frozen lo/hi -> [0,1]),
+# matching the retrained encoder. The same scaling_json drives training
+# (via global_norm.py) and this eval, so they cannot drift.

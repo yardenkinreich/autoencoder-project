@@ -17,3 +17,4 @@ logs/
 .snakefile
 .snakefile.lock
 .snakemake/
+runs/

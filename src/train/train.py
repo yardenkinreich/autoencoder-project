@@ -6,10 +6,14 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms.functional as TF
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import matplotlib.pyplot as plt
 import random
 import sys
+from torch.utils.tensorboard import SummaryWriter
 
 sys.path.append(os.path.abspath("src/models/mae"))
 from src.models.autoencoder import ConvAutoencoder
@@ -118,6 +122,23 @@ def load_pretrained_single_channel(model, checkpoint_path):
     return model
 
 
+def is_distributed() -> bool:
+    """True when launched via torchrun (WORLD_SIZE env var set, >1 process)."""
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
+
+
+def setup_distributed():
+    """
+    Single-node multi-GPU only. Launch with:
+        torchrun --standalone --nproc_per_node=<N> src/train/train.py ...
+    Plain `python src/train/train.py ...` still works unchanged (world_size=1).
+    """
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank, dist.get_rank(), dist.get_world_size()
+
+
 def plot_losses(train_losses, val_losses, save_path):
     plt.figure(figsize=(8, 5))
     plt.plot(train_losses, label='Train')
@@ -145,14 +166,27 @@ def main(args):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark     = False
 
-    device       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    distributed = is_distributed()
+    if distributed:
+        local_rank, rank, world_size = setup_distributed()
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        rank, world_size = 0, 1
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    is_main = (rank == 0)
+
     num_channels = 1
-    print(f"Device : {device}")
+    if is_main:
+        print(f"Device : {device}  |  world_size={world_size}")
 
     # ── load data ─────────────────────────────────────────────────────────
-    print(f"Loading : {args.input}")
+    # Deterministic and identical on every rank (same seed, no rank-dependent
+    # branching) so all processes agree on the same train/val/test split.
+    if is_main:
+        print(f"Loading : {args.input}")
     craters = load_memmap(args.input, num_channels)
-    print(f"  Total : {len(craters)}")
+    if is_main:
+        print(f"  Total : {len(craters)}")
 
     # track positions in ORIGINAL .dat coordinates throughout
     orig_index = np.arange(len(craters))          # full-file indices
@@ -162,9 +196,11 @@ def main(args):
         sub = np.random.default_rng(seed).choice(len(craters), size=n, replace=False)
         craters    = craters[sub]
         orig_index = orig_index[sub]              # subset positions in .dat coords
-        print(f"  Subset : {len(craters)}")
+        if is_main:
+            print(f"  Subset : {len(craters)}")
 
-    print(f"  Range  : [{craters.min():.3f}, {craters.max():.3f}]")
+    if is_main:
+        print(f"  Range  : [{craters.min():.3f}, {craters.max():.3f}]")
 
     # ── train / val split (mirrors make_split, but also splits orig_index) ──
     rng   = np.random.default_rng(seed)
@@ -180,15 +216,26 @@ def main(args):
     test_orig  = np.setdiff1d(np.arange(len(load_memmap(args.input, num_channels))),
                             orig_index)
 
-    print(f"  Train / Val / Test : {len(train_orig)} / {len(val_orig)} / {len(test_orig)}")
-
-    # ── persist split indices (original .dat coordinates) ───────────────────
     out_dir = os.path.dirname(args.model_output)
-    os.makedirs(out_dir, exist_ok=True)
-    np.save(os.path.join(out_dir, "train_idx.npy"), train_orig)
-    np.save(os.path.join(out_dir, "val_idx.npy"),   val_orig)
-    np.save(os.path.join(out_dir, "test_idx.npy"),  test_orig)
-    print(f"  Split indices saved → {out_dir}")
+    writer = None
+    if is_main:
+        print(f"  Train / Val / Test : {len(train_orig)} / {len(val_orig)} / {len(test_orig)}")
+
+        # ── persist split indices (original .dat coordinates) ───────────────
+        os.makedirs(out_dir, exist_ok=True)
+        np.save(os.path.join(out_dir, "train_idx.npy"), train_orig)
+        np.save(os.path.join(out_dir, "val_idx.npy"),   val_orig)
+        np.save(os.path.join(out_dir, "test_idx.npy"),  test_orig)
+        print(f"  Split indices saved → {out_dir}")
+
+        # ── live loss monitoring ─────────────────────────────────────────────
+        # tensorboard --logdir <out_dir>/tensorboard  (while training runs)
+        tb_dir = os.path.join(out_dir, "tensorboard")
+        writer = SummaryWriter(log_dir=tb_dir)
+        print(f"  TensorBoard  → tensorboard --logdir {tb_dir}")
+
+    if distributed:
+        dist.barrier()   # make sure out_dir exists before any rank needs it
 
     # ── datasets & loaders ────────────────────────────────────────────────
     # augment=True for training so H/V flips are applied on-the-fly.
@@ -197,8 +244,13 @@ def main(args):
     train_dataset = CraterDataset(train_data, augment=False)
     val_dataset   = CraterDataset(val_data,   augment=False)
 
+    # Each rank sees a different shard of train_data; validation runs on
+    # rank 0 only, over the full val_dataset (simpler and exact — no
+    # cross-rank loss averaging needed for the number that gets logged).
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=seed) if distributed else None
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                              shuffle=True,  num_workers=4, pin_memory=True)
+                              shuffle=(train_sampler is None), sampler=train_sampler,
+                              num_workers=4, pin_memory=True)
     val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size,
                               shuffle=False, num_workers=4, pin_memory=True)
 
@@ -223,11 +275,15 @@ def main(args):
     )
         model = model.to(device)
         if args.pretrained_weights and os.path.exists(args.pretrained_weights):
-            print(f"Loading pretrained weights : {args.pretrained_weights}")
+            if is_main:
+                print(f"Loading pretrained weights : {args.pretrained_weights}")
             model = load_pretrained_single_channel(model, args.pretrained_weights)
-        else:
+        elif is_main:
             print("No pretrained weights — training from scratch.")
         model = model.to(device)
+
+    if distributed:
+        model = DDP(model, device_ids=[local_rank])
 
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -237,10 +293,14 @@ def main(args):
 
     # ── training loop ─────────────────────────────────────────────────────
     train_losses, val_losses = [], []
+    global_step = 0
 
     for epoch in range(args.epochs):
+        if distributed:
+            train_sampler.set_epoch(epoch)   # different shuffle per epoch, per rank
+
         model.train()
-        running = 0.0
+        running, n_seen = 0.0, 0
         for (imgs,) in train_loader:
             imgs = imgs.to(device)
             if args.autoencoder_model == 'cae':
@@ -252,39 +312,69 @@ def main(args):
             loss.backward()
             optimizer.step()
             running += loss.item() * imgs.size(0)
+            n_seen  += imgs.size(0)
 
-        train_loss = running / len(train_dataset)
+            if is_main:
+                writer.add_scalar("Loss/train_step", loss.item(), global_step)
+            global_step += 1
+
+        if distributed:
+            # each rank only trained on its own shard — reduce to the true
+            # global average before logging/reporting
+            stats = torch.tensor([running, float(n_seen)], device=device)
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            train_loss = (stats[0] / stats[1]).item()
+        else:
+            train_loss = running / n_seen
         train_losses.append(train_loss)
 
-        model.eval()
-        running = 0.0
-        with torch.no_grad():
-            for (imgs,) in val_loader:
-                imgs = imgs.to(device)
-                if args.autoencoder_model == 'cae':
-                    loss = criterion(model(imgs), imgs)
-                else:
-                    loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
-                running += loss.item() * imgs.size(0)
-
-        val_loss = running / len(val_dataset)
-        val_losses.append(val_loss)
+        # validation runs on rank 0 only, over the full val set
+        if is_main:
+            model.eval()
+            running = 0.0
+            with torch.no_grad():
+                for (imgs,) in val_loader:
+                    imgs = imgs.to(device)
+                    if args.autoencoder_model == 'cae':
+                        loss = criterion(model(imgs), imgs)
+                    else:
+                        loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
+                    running += loss.item() * imgs.size(0)
+            val_loss = running / len(val_dataset)
+            val_losses.append(val_loss)
 
         scheduler.step()
-        print(f"Epoch {epoch+1:03d}/{args.epochs} | "
-              f"Train {train_loss:.4f} | Val {val_loss:.4f} | "
-              f"LR {scheduler.get_last_lr()[0]:.2e}")
+
+        if is_main:
+            lr = scheduler.get_last_lr()[0]
+            writer.add_scalar("Loss/train_epoch", train_loss, epoch)
+            writer.add_scalar("Loss/val_epoch",   val_loss,   epoch)
+            writer.add_scalar("LR",               lr,         epoch)
+            print(f"Epoch {epoch+1:03d}/{args.epochs} | "
+                  f"Train {train_loss:.4f} | Val {val_loss:.4f} | "
+                  f"LR {lr:.2e}")
 
     # ── save ──────────────────────────────────────────────────────────────
-    os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
-    torch.save(model.state_dict(), args.model_output)
-    print(f"Model saved → {args.model_output}")
+    if is_main:
+        writer.close()
+        os.makedirs(os.path.dirname(args.model_output), exist_ok=True)
+        state_dict = model.module.state_dict() if distributed else model.state_dict()
+        torch.save(state_dict, args.model_output)
+        print(f"Model saved → {args.model_output}")
 
-    plot_losses(train_losses, val_losses, args.loss_plot)
-    print(f"Loss plot  → {args.loss_plot}")
+        plot_losses(train_losses, val_losses, args.loss_plot)
+        print(f"Loss plot  → {args.loss_plot}")
+
+    if distributed:
+        dist.destroy_process_group()
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
+# Single GPU (unchanged, e.g. pin to a specific free GPU on a shared machine):
+#     CUDA_VISIBLE_DEVICES=7 python src/train/train.py --input ... --model_output ...
+#
+# Multi-GPU, single node — batch_size below is PER GPU:
+#     torchrun --standalone --nproc_per_node=4 src/train/train.py --input ... --model_output ...
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--autoencoder_model',  choices=['cae', 'mae'], default='mae')

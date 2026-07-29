@@ -13,19 +13,29 @@ EPOCHS            = 50
 MASK_RATIO        = 0.75
 MIN_DIAMETER      = 3.0
 MAX_DIAMETER      = 10.0
-PRETRAINED_WEIGHTS = ""
-DATASET = 'processed_wac_100m_new_augmented_no_left_band'  # for logging purposes, set to "" if not using a pretrained model
-SIGMA = "100"  # local .pth, set to "" to train from scratch
+NUM_SAMPLES       = 25000       # how much data to actually train on, out of everything in INPUT_DIR
+PRETRAINED_WEIGHTS = ""         # path to a .pth checkpoint to init from; "" trains from scratch
+NUM_GPUS          = 1           # >1 trains train_autoencoder via torchrun (single node) instead of plain python
+
+# --- Preprocessed data source ---
+# Keep INPUT_DIR and DATA_TAG together: DATA_TAG is a short label for INPUT_DIR,
+# used to group runs in logs/. If you point INPUT_DIR at different data, update
+# DATA_TAG in the same edit so runs on different data never share a folder.
+INPUT_DIR = "data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band"
+DATA_TAG  = "wac100m_sigma100_noband"
 
 # --- Run naming ---
+# key=value tokens (not bare numbers) so a folder name alone tells you the run's
+# config; runs that share model + data + these params share a folder, so reruns
+# with identical settings resume/overwrite instead of fragmenting into new ones.
 if AUTOENCODER_MODEL == "cae":
-    RUN_NAME = f"{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}_{LATENT_DIM}"
-    RUN_DIR  = f"logs/{AUTOENCODER_MODEL}/{DATASET}/{SIGMA}/{RUN_NAME}"
+    RUN_NAME = f"d{MIN_DIAMETER:g}-{MAX_DIAMETER:g}_ep{EPOCHS}_lat{LATENT_DIM}_n{NUM_SAMPLES}"
 elif AUTOENCODER_MODEL == "mae":
-    RUN_NAME = f"{MIN_DIAMETER}_{MAX_DIAMETER}_{EPOCHS}_mask{MASK_RATIO}"
-    RUN_DIR  = f"logs/{AUTOENCODER_MODEL}/{DATASET}/{SIGMA}/{RUN_NAME}"
+    RUN_NAME = f"d{MIN_DIAMETER:g}-{MAX_DIAMETER:g}_ep{EPOCHS}_mask{MASK_RATIO:g}_n{NUM_SAMPLES}"
 else:
     raise ValueError("Unsupported AUTOENCODER_MODEL. Choose 'cae' or 'mae'.")
+
+RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{DATA_TAG}/{RUN_NAME}"
 
 MODELS_DIR  = f"{RUN_DIR}/models"
 RESULTS_DIR = f"{RUN_DIR}/results"
@@ -38,9 +48,14 @@ if os.path.exists("Snakefile"):
     shutil.copy("Snakefile", f"{RUN_DIR}/Snakefile.snapshot")
 
 # --- Config toggles ---
-RUN_PREPROCESS    = False
 RUN_DISPLAY       = True
 RUN_CLUSTER_JULIE = True
+
+# torchrun launch prefix for train_autoencoder — see src/train/train.py header
+# for single-vs-multi-GPU launch details. NUM_GPUS=1 (default) behaves exactly
+# as before.
+TRAIN_LAUNCHER = (f"torchrun --standalone --nproc_per_node={NUM_GPUS}"
+                  if NUM_GPUS > 1 else "python")
 
 # --- Rule all ---
 rule all:
@@ -61,13 +76,14 @@ rule all:
 rule preprocess_craters:
     input:
         map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
-        craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv"
+        craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
+        scaling_json = "configs/global_scaling.json"
     output:
-        output_dir_clean = directory("data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/crater_crops_clean"),
-        output_dir_aug   = directory("data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/crater_crops_aug"),
-        np_output_clean  = "data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_clean.dat",
-        np_output_aug    = "data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_aug.dat",
-        metadata_output  = "data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/metadata.csv"
+        output_dir_clean = directory(f"{INPUT_DIR}/crater_crops_clean"),
+        output_dir_aug   = directory(f"{INPUT_DIR}/crater_crops_aug"),
+        np_output_clean  = f"{INPUT_DIR}/craters_clean.dat",
+        np_output_aug    = f"{INPUT_DIR}/craters_aug.dat",
+        metadata_output  = f"{INPUT_DIR}/metadata.csv"
     params:
         min_diameter      = MIN_DIAMETER,
         max_diameter      = MAX_DIAMETER,
@@ -92,21 +108,24 @@ rule preprocess_craters:
             --save_raw_crops \
             --save_np_array \
             --autoencoder_model {params.autoencoder_model} \
-            --exclude_lon_bounds 180 270
+            --exclude_lon_bounds 180 270 \
+            --norm_mode global \
+            --scaling_json {input.scaling_json}
 
         """
 
 # --- Main training ---
 rule train_autoencoder:
     input:
-        data = "data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_aug.dat"
+        data = f"{INPUT_DIR}/craters_aug.dat"
     output:
         model     = f"{MODELS_DIR}/autoencoder.pth",
         loss_plot = f"{MODELS_DIR}/loss_curve.png"
     params:
+        launcher          = TRAIN_LAUNCHER,
         autoencoder_model = AUTOENCODER_MODEL,
         epochs            = EPOCHS,
-        batch_size        = 128,
+        batch_size        = 128,   # per GPU when NUM_GPUS > 1
         lr                = 1e-3,
         weight_decay      = 1e-5,
         min_lr            = 1e-8,
@@ -114,10 +133,10 @@ rule train_autoencoder:
         mask_ratio        = MASK_RATIO,
         latent_dim        = LATENT_DIM,
         pretrained        = PRETRAINED_WEIGHTS if AUTOENCODER_MODEL == "mae" else "",
-        num_samples        = 25000 
+        num_samples       = NUM_SAMPLES
     shell:
         """
-        PYTHONPATH=$(pwd) python src/train/train.py \
+        PYTHONPATH=$(pwd) {params.launcher} src/train/train.py \
             --autoencoder_model {params.autoencoder_model} \
             --num_samples {params.num_samples} \
             --input {input.data} \
@@ -138,7 +157,7 @@ rule train_autoencoder:
 # --- Reconstruction ---
 rule reconstruct_craters:
     input:
-        npy   = f"data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_aug.dat",
+        npy   = f"{INPUT_DIR}/craters_aug.dat",
         model = f"{MODELS_DIR}/autoencoder.pth"
     output:
         reconstructions = f"{MODELS_DIR}/reconstructions.png"
@@ -226,8 +245,8 @@ rule plot_latent_imgs:
 rule display_clusters:
     input:
         model    = f"{MODELS_DIR}/autoencoder.pth",
-        dataset  = f"data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_aug.dat",
-        metadata = f"data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/metadata.csv"
+        dataset  = f"{INPUT_DIR}/craters_aug.dat",
+        metadata = f"{INPUT_DIR}/metadata.csv"
     output:
         df             = f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.csv",
         clustering_png = f"{RESULTS_DIR}/crater_clusters_{NUM_CLUSTERS}.png"

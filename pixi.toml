@@ -40,6 +40,7 @@ gdal = ">=3.10.3,<4"
 rasterio = ">=1.4.4,<2"
 sqlite = ">=3.51.2,<4"
 wget = ">=1.21.4,<2"
+tensorboard = ">=2.20.0,<3"
 
 [pypi-dependencies]
 snakemake = "*"

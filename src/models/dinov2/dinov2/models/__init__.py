@@ -5,7 +5,7 @@
 
 import logging
 
-from ......dinov2.dinov2.models import vision_transformer as vits
+from src.models.dinov2.dinov2.models import vision_transformer as vits
 
 
 logger = logging.getLogger("dinov2")

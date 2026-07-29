@@ -1,10 +1,11 @@
 r"""
-pipeline.py — turn Julie's labeled crater PNGs into latents + KMeans clusters.
+pipeline.py — turn a labeled crater PNG set into latents + KMeans clusters.
 
-Wired to the repo's real code (src/models/mae_bottleneck.py): MAE encoder, no
-masking, CLS token through the trained clustering bottleneck (same path
-src/cluster/cluster.py and src/display/display.py use). This is the half
-that touches YOUR repo.
+Wired to the repo's real code via src/cluster/cluster.py's build_model()/
+ENCODE_FNS — the same dispatch cluster.py's own CLI and
+src/display/display.py use, so eval embeds craters exactly the way
+production clustering does, for whichever architecture (mae/cae/dino) the
+checkpoint is. This is the half that touches YOUR repo.
 
 We embed IN-PROCESS rather than shelling out to a Snakemake rule: the metrics
 need the latent vectors (silhouette/separation) and per-centroid distances
@@ -12,22 +13,26 @@ need the latent vectors (silhouette/separation) and per-centroid distances
 gives the distances for free.
 
 Faithfulness note: eval MUST preprocess exactly as the encoder was trained.
-Your load_images() does grayscale -> resize(128) -> /255.0 (NOT per-sample
-min-max, NOT global-percentile). We mirror that here. Changing to global
-scaling is a *training* decision; for valid eval we match the checkpoint.
+For MAE/CAE that means global-percentile scaling at the SAME field of view
+(offset=0.5, tight crop) preprocess_2.py's default --clean_offset uses.
+
+⚠️ DINO trains on a WIDER field of view (--clean_offset ~1.0, see
+preprocess_2.py / configs/dino_craters.yaml) than MAE/CAE's tight 0.5 crop.
+A PNG set exported for MAE eval (like Julie's existing craters_for_danny)
+is almost certainly the WRONG field of view for evaluating a DINO
+checkpoint — the image would show less surrounding context than DINO was
+trained on. Evaluating DINO needs its own wide-FOV export of the same
+craters, not a reuse of the MAE-FOV PNGs. This isn't handled automatically;
+if you point a DINO checkpoint at an MAE-FOV imgs_dir, the numbers will be
+silently wrong (self-consistent, low-error-looking, but comparing a model
+to data it wasn't trained to see this way).
 """
 from __future__ import annotations
 import os
 import numpy as np
 import pandas as pd
 
-# ── must mirror src/train/latent_space.py ────────────────────────────────────
 INPUT_SIZE = 128
-MAE_KWARGS = dict(
-    img_size=128, patch_size=8, in_chans=1, norm_pix_loss=True,
-    embed_dim=768, depth=12, num_heads=12,
-    decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16, mlp_ratio=4.0,
-)
 # filename state -> ordinal class. Julie's labeled set spans states 2,3,4 only
 # (no fresh/New craters), so the ordinal axis is 3-wide: Semi-New=0 .. Old=2.
 # (Training still clusters the full population into 4; this map is EVAL-ONLY.)
@@ -38,10 +43,10 @@ ORDINAL_NAMES = ["Semi-New", "Semi-Old", "Old"]
 # ── labels from PNG filenames ────────────────────────────────────────────────
 def labels_from_png_dir(imgs_dir: str) -> pd.DataFrame:
     """
-    Build the labels table directly from Julie's PNG folder.
+    Build the labels table directly from a labeled crater PNG folder.
     Filename convention (from load_images): <crater_id>_<state>.png, state in 1..4.
     Returns crater_id, true_label (0..3 ordinal), filename — row order = sorted
-    files, which is exactly the order encode() will produce latents in.
+    files, which is exactly the order embed() will produce latents in.
     """
     files = sorted(f for f in os.listdir(imgs_dir) if f.endswith(".png"))
     if not files:
@@ -62,8 +67,8 @@ def labels_from_png_dir(imgs_dir: str) -> pd.DataFrame:
         states = sorted({s for _, s in skipped})
         warnings.warn(
             f"skipped {len(skipped)} PNG(s) with states {states} outside the "
-            f"eval class set {sorted(STATE_TO_ORDINAL)} — they are not in Julie's "
-            f"3-state labeled set and have no ground-truth class.", stacklevel=2)
+            f"eval class set {sorted(STATE_TO_ORDINAL)} — they have no "
+            f"ground-truth class in this scheme.", stacklevel=2)
     return pd.DataFrame(rows)
 
 
@@ -97,26 +102,29 @@ def _png_to_global(arr_0_255: np.ndarray, lo: float, hi: float,
     png/png_max — and that equals the training global_normalize output. So we
     divide by png_max here. If the PNGs were exported with ANY per-image stretch
     or a different window, no constant can fix it and the latents are not
-    comparable — re-export Julie's PNGs through the same global window instead.
+    comparable — re-export the PNGs through the same global window instead.
     """
     return arr_0_255 / png_max
 
 
-# ── embed: call the repo's real MAE encoder ──────────────────────────────────
+# ── embed: call the repo's real encoder, whichever architecture ─────────────
 def embed(labels: pd.DataFrame, cfg: dict, synthetic: bool = False) -> np.ndarray:
+    """
+    cfg needs: checkpoint, imgs_dir, scaling_json, and autoencoder_model
+    ("mae" | "cae" | "dino" — see the module docstring's FOV warning for dino).
+    """
     if synthetic:
         return _synth_latents(labels, cfg)
 
     import torch
-    from src.models.mae_bottleneck import load_mae, encode_for_clustering
     from PIL import Image
+    from src.cluster.cluster import build_model, ENCODE_FNS
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # load_mae auto-detects whether this checkpoint has the clustering
-    # bottleneck (old runs) or not (current default) and builds accordingly —
-    # same helper src/cluster/cluster.py and src/display/display.py use, so
-    # eval embeds craters exactly the way production clustering does.
-    model = load_mae(checkpoint_path=cfg["checkpoint"], device=device, **MAE_KWARGS)
+    autoencoder_model = cfg.get("autoencoder_model", "mae")
+    model = build_model(autoencoder_model, cfg.get("bottleneck", 64),
+                        cfg["checkpoint"], device)
+    encode = ENCODE_FNS[autoencoder_model]
 
     imgs_dir = cfg["imgs_dir"]
     lo, hi, png_max = _resolve_scaling(cfg)
@@ -129,7 +137,7 @@ def embed(labels: pd.DataFrame, cfg: dict, synthetic: bool = False) -> np.ndarra
         tensors.append(torch.from_numpy(arr).unsqueeze(0))
     x = torch.stack(tensors).float().to(device)        # (N,1,128,128)
 
-    latents = encode_for_clustering(model, x).cpu().numpy()
+    latents = encode(model, x).cpu().numpy()
     return latents
 
 
@@ -144,6 +152,7 @@ def build_predictions(labels, latents, clusters, dists) -> pd.DataFrame:
     out = pd.DataFrame({
         "crater_id": labels["crater_id"].values,
         "true_label": labels["true_label"].astype(int).values,
+        "filename": labels["filename"].values,
         "cluster": np.asarray(clusters).astype(int),
     })
     if dists is not None:

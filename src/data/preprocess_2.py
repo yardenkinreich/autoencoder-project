@@ -137,7 +137,8 @@ def load_holdout_crater_ids(path):
 
 def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
                              latitude_bounds, craters_to_output,
-                             exclude_lon_bounds=None, exclude_crater_ids=None):
+                             exclude_lon_bounds=None, exclude_crater_ids=None,
+                             only_crater_ids=None):
     """
     Filter the crater catalog by diameter and latitude, and optionally drop a
     longitude band corrupted by mosaic stitching (the WAC morphology mosaic has
@@ -157,6 +158,13 @@ def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
         run's sample regardless of which subset gets drawn — this is what
         keeps eval sets (Julie's, etc.) actually held out rather than
         possibly already seen during training by chance.
+
+    only_crater_ids : path to a crater ID registry (same format). The
+        opposite of exclude_crater_ids — restricts the filtered pool to ONLY
+        these craters (still subject to the diameter/latitude/longitude
+        filters above). Use to materialize a held-out set's actual image
+        data for eval (e.g. --only_crater_ids configs/holdout_crater_ids.csv),
+        as opposed to excluding it from a training run.
     """
     craters = pd.read_csv(craters_csv)
     filtered = craters[
@@ -184,6 +192,13 @@ def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
         filtered = filtered[~filtered['CRATER_ID'].astype(str).isin(holdout_ids)]
         print(f"Excluded {n_before - len(filtered)} held-out craters "
               f"(from {exclude_crater_ids}, registry has {len(holdout_ids)} IDs)")
+
+    if only_crater_ids is not None:
+        keep_ids = load_holdout_crater_ids(only_crater_ids)
+        n_before = len(filtered)
+        filtered = filtered[filtered['CRATER_ID'].astype(str).isin(keep_ids)]
+        print(f"Restricted to {len(filtered)} of {n_before} craters "
+              f"(from {only_crater_ids}, registry has {len(keep_ids)} IDs)")
 
     if craters_to_output > 0:
         filtered = filtered.sample(n=craters_to_output, random_state=42)
@@ -434,6 +449,10 @@ if __name__ == '__main__':
                              "never appear in training data regardless of which subset "
                              "gets drawn. Use for any crater set reserved for eval "
                              "(e.g. configs/holdout_crater_ids.csv).")
+    parser.add_argument('--only_crater_ids',      default=None,
+                        help="Opposite of --exclude_crater_ids: restrict output to "
+                             "ONLY these craters. Use to materialize a held-out set's "
+                             "actual image data for eval.")
     parser.add_argument('--save_raw_crops',       action='store_true')
     parser.add_argument('--save_np_array',        action='store_true')
     parser.add_argument('--autoencoder_model',    type=str,
@@ -470,6 +489,7 @@ if __name__ == '__main__':
         args.latitude_bounds, args.craters_to_output,
         exclude_lon_bounds=args.exclude_lon_bounds,
         exclude_crater_ids=args.exclude_crater_ids,
+        only_crater_ids=args.only_crater_ids,
     )
     print(f"Filtered {len(filtered)} craters")
 

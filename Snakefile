@@ -24,6 +24,14 @@ NUM_GPUS          = 1           # >1 trains train_autoencoder via torchrun (sing
 INPUT_DIR = "data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band"
 DATA_TAG  = "wac100m_sigma100_noband"
 
+# Held-out test set (configs/holdout_crater_ids.csv), preprocessed at the same
+# FOV/offset as INPUT_DIR (0.5, MAE/CAE's tight crop) so it's directly
+# comparable to what those two architectures trained on. DINO's wider FOV
+# (see DINO_CLEAN_OFFSET below) would need its own separate holdout export -
+# not built yet, since nothing evaluates DINO reconstruction (it doesn't
+# reconstruct images the way MAE/CAE do).
+HOLDOUT_DIR = "data/processed_wac_100m_new/sigma/100/holdout"
+
 # --- Run naming ---
 # key=value tokens (not bare numbers) so a folder name alone tells you the run's
 # config; runs that share model + data + these params share a folder, so reruns
@@ -131,6 +139,48 @@ rule preprocess_craters:
             --scaling_json {input.scaling_json}
 
         """
+
+
+rule preprocess_holdout_set:
+    # Materializes configs/holdout_crater_ids.csv's actual image data (it's
+    # only an ID list until preprocessed) at the same FOV/offset as INPUT_DIR,
+    # for MAE/CAE reconstruction-loss and embedding testing. No aug/rotation
+    # branch - this is a test set, not something to train on.
+    input:
+        map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
+        craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
+        scaling_json = "configs/global_scaling.json",
+        holdout_ids  = "configs/holdout_crater_ids.csv"
+    output:
+        output_dir_clean = directory(f"{HOLDOUT_DIR}/crater_crops"),
+        np_output_clean  = f"{HOLDOUT_DIR}/craters.dat",
+        metadata_output  = f"{HOLDOUT_DIR}/metadata.csv"
+    params:
+        min_diameter = MIN_DIAMETER,
+        max_diameter = MAX_DIAMETER,
+        lat_min      = -60,
+        lat_max      = 60
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/data/preprocess_2.py \
+            --map_file {input.map_file} \
+            --craters_csv {input.craters_csv} \
+            --output_dir_clean {output.output_dir_clean} \
+            --np_output_path_clean {output.np_output_clean} \
+            --info_output_path {output.metadata_output} \
+            --min_diameter {params.min_diameter} \
+            --max_diameter {params.max_diameter} \
+            --latitude_bounds {params.lat_min} {params.lat_max} \
+            --craters_to_output -1 \
+            --only_crater_ids {input.holdout_ids} \
+            --save_raw_crops \
+            --save_np_array \
+            --autoencoder_model mae \
+            --exclude_lon_bounds 180 270 \
+            --norm_mode global \
+            --scaling_json {input.scaling_json}
+        """
+
 
 # --- Main training ---
 rule train_autoencoder:

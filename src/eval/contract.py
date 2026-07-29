@@ -16,9 +16,9 @@ dist_0..dist_{C-1}: float  OPTIONAL. distance/soft-assignment to each cluster
                           centroid. If present, enables calibration (ECE,
                           reliability) after we convert to class-probabilities.
 
-You produce this table with run_pipeline.py (a thin adapter around YOUR repo).
-You consume it with evaluate.py. Nothing else needs to know how craters became
-clusters.
+You produce this table with pipeline.py's embed()/kmeans_cluster()/
+build_predictions() (a thin adapter around YOUR repo). You consume it with
+evaluate.py. Nothing else needs to know how craters became clusters.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field

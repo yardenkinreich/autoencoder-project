@@ -91,6 +91,16 @@ def _encode_cae_batch(model: ConvAutoencoder,
         return model.encoder(imgs)
 
 
+# public dispatch table — reused by src/eval/pipeline.py so there's one
+# place that knows how to turn (autoencoder_model, model, imgs) into an
+# embedding, instead of a third copy of this dispatch logic.
+ENCODE_FNS = {
+    "mae":  _encode_mae_batch,
+    "dino": _encode_dino_batch,
+    "cae":  _encode_cae_batch,
+}
+
+
 # ── data loaders ──────────────────────────────────────────────────────────────
 
 def load_images(imgs_dir: str) -> tuple:
@@ -123,11 +133,7 @@ def encode_images(
     is_dataloader: bool = False,
 ):
     model  = build_model(autoencoder_model, bottleneck, model_path, device)
-    encode = {
-        "mae":  _encode_mae_batch,
-        "dino": _encode_dino_batch,
-        "cae":  _encode_cae_batch,
-    }[autoencoder_model]
+    encode = ENCODE_FNS[autoencoder_model]
 
     if is_dataloader:
         latents_list = []

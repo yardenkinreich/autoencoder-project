@@ -10,6 +10,9 @@ Checklist coverage:
   [x] Calibration: reliability diagram + ECE   (needs probabilities)
   [x] Bootstrap CIs on key metrics
   [x] Separation: silhouette in latent space + cluster purity
+  [x] Generic (non-ordinal) agreement: ARI / NMI / V-measure
+  [x] Latent-space structure: Procrustes / distance-correlation vs ground truth
+  [x] Continuum evidence: SVM boundary uncertainty
 """
 from __future__ import annotations
 import numpy as np
@@ -139,3 +142,95 @@ def acc_fn(df, n_classes):     return float((df["true_label"] == df["pred_label"
 def qwk_fn(df, n_classes):     return quadratic_weighted_kappa(df, n_classes)
 def ordmae_fn(df, n_classes):  return ordinal_mae(df)
 def macrof1_fn(df, n_classes): return float(per_class(df, n_classes)["f1"].mean())
+
+
+# ---- generic (non-ordinal) agreement ----------------------------------------
+
+def clustering_agreement(df: pd.DataFrame) -> dict:
+    """
+    ARI / NMI / V-measure between true_label and pred_label. These don't
+    assume the classes are ordered — a sanity check independent of the
+    ordinal framing QWK/ordinal_mae use, from src/test/evaluate.py.
+    """
+    from sklearn.metrics import (
+        adjusted_rand_score, normalized_mutual_info_score, v_measure_score,
+    )
+    return {
+        "ari": float(adjusted_rand_score(df["true_label"], df["pred_label"])),
+        "nmi": float(normalized_mutual_info_score(df["true_label"], df["pred_label"])),
+        "v_measure": float(v_measure_score(df["true_label"], df["pred_label"])),
+    }
+
+
+# ---- latent-space structure vs ground truth ---------------------------------
+
+def geometry_comparison(latents: np.ndarray, df: pd.DataFrame) -> dict:
+    """
+    Structural comparison between predicted-class and true-class centroids in
+    latent space: does the geometry the model learned actually mirror the
+    ground-truth class structure, not just per-crater label agreement?
+    From src/test/evaluate.py's compare_cluster_geometry, reworked to group
+    by the already-aligned pred_label rather than re-deriving cluster->class
+    from a reversed dict (which silently drops clusters in majority-vote
+    mode, where multiple raw clusters map to the same class).
+
+    procrustes_disparity : lower = predicted centroid layout is a closer
+        (rotation/scale/translation-invariant) match to the true layout.
+    distance_correlation : Spearman correlation between pairwise true-class
+        distances and pairwise predicted-class distances - e.g. does "Old"
+        sit as far from "Semi-New" in the model's space as it should?
+
+    Needs >=2 classes with both true and predicted samples; NaNs otherwise.
+    """
+    from scipy.spatial import procrustes
+    from scipy.spatial.distance import cdist
+    from scipy.stats import spearmanr
+
+    classes = sorted(df["true_label"].unique())
+    gt_centroids, pr_centroids = [], []
+    for c in classes:
+        gt_mask = (df["true_label"] == c).to_numpy()
+        pr_mask = (df["pred_label"] == c).to_numpy()
+        if gt_mask.sum() == 0 or pr_mask.sum() == 0:
+            continue
+        gt_centroids.append(latents[gt_mask].mean(axis=0))
+        pr_centroids.append(latents[pr_mask].mean(axis=0))
+
+    if len(gt_centroids) < 2:
+        return {"procrustes_disparity": float("nan"), "distance_correlation": float("nan")}
+
+    gt_centroids, pr_centroids = np.array(gt_centroids), np.array(pr_centroids)
+    _, _, disparity = procrustes(gt_centroids, pr_centroids)
+
+    gt_dists = cdist(gt_centroids, gt_centroids)[np.triu_indices(len(gt_centroids), k=1)]
+    pr_dists = cdist(pr_centroids, pr_centroids)[np.triu_indices(len(pr_centroids), k=1)]
+    if np.std(gt_dists) == 0 or np.std(pr_dists) == 0:
+        corr = float("nan")
+    else:
+        corr, _ = spearmanr(gt_dists, pr_dists)
+
+    return {"procrustes_disparity": float(disparity), "distance_correlation": float(corr)}
+
+
+def boundary_uncertainty(latents: np.ndarray, df: pd.DataFrame) -> dict:
+    """
+    Are the classes cleanly separated, or is this really a continuum? Fits a
+    cross-validated SVM to predict true_label from latents, then measures the
+    entropy of its class probabilities: low entropy = confident, cleanly
+    separated classes; high entropy = classes blur together in latent space
+    (evidence degradation state is a continuum, not discrete clusters - a
+    real possibility for erosion state). From src/test/evaluate.py.
+    """
+    from sklearn.svm import SVC
+    from sklearn.model_selection import cross_val_predict
+    from scipy.stats import entropy
+
+    y = df["true_label"].to_numpy()
+    min_class_count = np.min(np.unique(y, return_counts=True)[1])
+    cv_folds = min(5, min_class_count)
+    if cv_folds < 2:
+        return {"boundary_uncertainty": float("nan")}
+
+    clf = SVC(kernel="rbf", probability=True, random_state=42)
+    proba = cross_val_predict(clf, latents, y, cv=cv_folds, method="predict_proba")
+    return {"boundary_uncertainty": float(np.mean(entropy(proba, axis=1)))}

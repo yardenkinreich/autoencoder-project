@@ -1,0 +1,34 @@
+# Shared test-set definitions for src/eval/evaluate.py, reused across every
+# model run so comparisons are apples-to-apples. Per-run specifics
+# (checkpoint path, architecture) are CLI args, not here — see:
+#   python -m eval.evaluate --checkpoint ... --autoencoder-model {mae,cae,dino} \
+#       --config configs/eval_suite.yaml --out runs/eval/<run_name>
+#
+# Distinct from configs/erosion4.yaml, which notebooks/evaluate_pipeline.ipynb
+# still uses directly for a quick single-set (Julie-only, MAE-only)
+# interactive check — kept working as-is, not replaced by this.
+
+class_names: ["Semi-New", "Semi-Old", "Old"]
+n_clusters: 3
+seed: 0
+
+scaling_json: "configs/global_scaling.json"
+png_max: 255
+
+# Every labeled set here gets the FULL metric suite (accuracy/QWK/ordinal-MAE/
+# ECE/ARI/NMI/V-measure/geometry/boundary-uncertainty) computed against it.
+# ⚠️ imgs_dir must be at the SAME field-of-view the checkpoint's architecture
+# was trained on (MAE/CAE: offset 0.5; DINO: offset ~1.0 - see
+# src/eval/pipeline.py's module docstring). Don't point a dino checkpoint at
+# an MAE-FOV set.
+labeled_sets:
+  julie:
+    imgs_dir: "data/raw/craters_for_danny"
+  # new_set:
+  #   imgs_dir: "..."   # add once available (lat/long list pending)
+
+# Held-out UNLABELED set (configs/holdout_crater_ids.csv), materialized by
+# `snakemake preprocess_holdout_set`. Used for reconstruction loss (mae/cae
+# only) and unsupervised clustering quality (all architectures).
+holdout:
+  dat_path: "data/processed_wac_100m_new/sigma/100/holdout/craters.dat"

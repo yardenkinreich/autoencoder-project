@@ -61,7 +61,11 @@ TRAIN_LAUNCHER = (f"torchrun --standalone --nproc_per_node={NUM_GPUS}"
 # DINO isn't part of `rule all` — it's a different training paradigm
 # (self-distillation, not reconstruction) with its own checkpoint format;
 # see src/train/train_dino.py and configs/dino_craters.yaml.
-DINO_GPUS         = 1     # DINOv2's do_train() always needs torchrun, even at 1 (see train_dino.py)
+DINO_GPUS         = 1     # DINOv2's do_train() always needs torchrun, even at 1 (see train_dino.py).
+                            # Multi-GPU verified working for real (2-GPU smoke test) - eval/final/
+                            # teacher_checkpoint.pth is correctly consolidated across ranks regardless
+                            # of DINO_GPUS; model_final.rank_N.pth (resume checkpoint) is per-rank by
+                            # design and needs the same GPU count to resume from.
 DINO_EPOCHS       = 100
 DINO_CLEAN_OFFSET = 1.0   # ~2x diameter FOV (vs MAE's 0.5) — see preprocess_2.py --clean_offset
 

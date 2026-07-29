@@ -1,8 +1,10 @@
 r"""
 pipeline.py — turn Julie's labeled crater PNGs into latents + KMeans clusters.
 
-Wired to the repo's real code (src/train/latent_space.py): MAE encoder, no
-masking, mean-pooled patch tokens. This is the half that touches YOUR repo.
+Wired to the repo's real code (src/models/mae_bottleneck.py): MAE encoder, no
+masking, CLS token through the trained clustering bottleneck (same path
+src/cluster/cluster.py and src/display/display.py use). This is the half
+that touches YOUR repo.
 
 We embed IN-PROCESS rather than shelling out to a Snakemake rule: the metrics
 need the latent vectors (silhouette/separation) and per-centroid distances
@@ -106,14 +108,15 @@ def embed(labels: pd.DataFrame, cfg: dict, synthetic: bool = False) -> np.ndarra
         return _synth_latents(labels, cfg)
 
     import torch
-    from src.models.mae.models_mae import MaskedAutoencoderViT
+    from src.models.mae_bottleneck import load_mae, encode_for_clustering
     from PIL import Image
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MaskedAutoencoderViT(**MAE_KWARGS)
-    state = torch.load(cfg["checkpoint"], map_location=device)
-    model.load_state_dict(state, strict=True)
-    model.to(device).eval()
+    # load_mae auto-detects whether this checkpoint has the clustering
+    # bottleneck (old runs) or not (current default) and builds accordingly —
+    # same helper src/cluster/cluster.py and src/display/display.py use, so
+    # eval embeds craters exactly the way production clustering does.
+    model = load_mae(checkpoint_path=cfg["checkpoint"], device=device, **MAE_KWARGS)
 
     imgs_dir = cfg["imgs_dir"]
     lo, hi, png_max = _resolve_scaling(cfg)
@@ -126,9 +129,7 @@ def embed(labels: pd.DataFrame, cfg: dict, synthetic: bool = False) -> np.ndarra
         tensors.append(torch.from_numpy(arr).unsqueeze(0))
     x = torch.stack(tensors).float().to(device)        # (N,1,128,128)
 
-    with torch.no_grad():                              # mean-pooled patch tokens
-        latent, _, _ = model.forward_encoder(x, mask_ratio=0.0)
-        latents = latent[:, 1:, :].mean(dim=1).cpu().numpy()
+    latents = encode_for_clustering(model, x).cpu().numpy()
     return latents
 
 

@@ -22,3 +22,6 @@ runs/
 # generated plots/notebooks belong in results/, notebooks/, or archive_lpsc_2026/, not loose at root
 /*.png
 /*.ipynb
+
+# pretrained checkpoints downloaded alongside vendored MAE source, not project code
+src/models/mae/*.pth

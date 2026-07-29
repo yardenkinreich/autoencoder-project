@@ -208,7 +208,7 @@ def main(args):
         criterion = nn.MSELoss()
 
     elif args.autoencoder_model == 'mae':
-        model = MaskedAutoencoderViT(        # ← was mae_vit_base_patch16(...)
+        model = MaskedAutoencoderViT(        # plain, bottleneck-free (current default for new runs)
             img_size=128,
             patch_size=8,
             in_chans=1,
@@ -246,7 +246,7 @@ def main(args):
             if args.autoencoder_model == 'cae':
                 loss = criterion(model(imgs), imgs)
             else:
-                loss, _, _, _ = model(imgs, mask_ratio=args.mask_ratio)
+                loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
 
             optimizer.zero_grad()
             loss.backward()
@@ -264,7 +264,7 @@ def main(args):
                 if args.autoencoder_model == 'cae':
                     loss = criterion(model(imgs), imgs)
                 else:
-                    loss, _, _, _ = model(imgs, mask_ratio=args.mask_ratio)
+                    loss, _, _ = model(imgs, mask_ratio=args.mask_ratio)
                 running += loss.item() * imgs.size(0)
 
         val_loss = running / len(val_dataset)

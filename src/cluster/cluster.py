@@ -1,12 +1,12 @@
 """
-latent_space.py
-───────────────
+cluster.py
+──────────
 Encode craters into latent space and visualise with PCA / t-SNE.
 
 Usage:
-    python src/train/latent_space.py encode   --imgs-dir ...  --model ... --autoencoder-model mae ...
-    python src/train/latent_space.py plot-dots --latents ...  --states ... --out-png ...
-    python src/train/latent_space.py plot-imgs --latents ...  --imgs-dir ... --out-png ...
+    python src/cluster/cluster.py encode   --imgs-dir ...  --model ... --autoencoder-model mae ...
+    python src/cluster/cluster.py plot-dots --latents ...  --states ... --out-png ...
+    python src/cluster/cluster.py plot-imgs --latents ...  --imgs-dir ... --out-png ...
 """
 
 import os
@@ -25,7 +25,7 @@ from PIL import Image
 sys.path.append(os.path.abspath("."))
 sys.path.append(os.path.abspath("src/models/mae"))   # for util.pos_embed
 from src.models.autoencoder import ConvAutoencoder
-from src.models.mae.models_mae import MaskedAutoencoderViT
+from src.models.mae_bottleneck import load_mae, encode_for_clustering
 
 # ── architecture — must mirror train.py exactly ───────────────────────────────
 INPUT_SIZE = 128      # ← was 224; matches OUTPUT_SIZE in preprocess.py
@@ -60,35 +60,18 @@ def build_model(autoencoder_model: str, bottleneck: int,
         model.to(device).eval()
         return model
 
-    # mae
-    model = MaskedAutoencoderViT(**MAE_KWARGS)
-    state = torch.load(model_path, map_location=device)
-    msg   = model.load_state_dict(state, strict=True)
-    print(f"  MAE weights loaded: {msg}")
-    model.to(device).eval()
+    # mae — load_mae auto-detects whether this checkpoint has the clustering
+    # bottleneck (old runs) or not (current default) and builds accordingly.
+    model = load_mae(checkpoint_path=model_path, device=device, **MAE_KWARGS)
+    model.eval()
     return model
 
 
 # ── encoding helpers ──────────────────────────────────────────────────────────
-
-def _encode_mae_batch(model: MaskedAutoencoderViT,
-                      imgs: torch.Tensor) -> torch.Tensor:
-    """
-    Extract a fixed-size latent vector from the MAE encoder.
-
-    Uses mask_ratio=0 (no masking) so every patch is visible —
-    giving a deterministic, stable representation for clustering.
-    The CLS token is used as the latent vector (index 0 of encoder output).
-    If encode_cluster() exists on the model we use it; otherwise we fall
-    back to the standard forward_encoder path.
-    """
-    if hasattr(model, "encode_cluster"):
-        return model.encode_cluster(imgs)
-
-    # fallback: run encoder with no masking, take CLS token
-    with torch.no_grad():
-        latent, _, _ = model.forward_encoder(imgs, mask_ratio=0.0)
-    return latent[:, 1:, :].mean(dim=1)  
+# _encode_mae_batch: thin wrapper so build_model()/encode_images() below can
+# dispatch on autoencoder_model without an if/else at every call site.
+def _encode_mae_batch(model, imgs: torch.Tensor) -> torch.Tensor:
+    return encode_for_clustering(model, imgs)
 
 
 def _encode_cae_batch(model: ConvAutoencoder,

@@ -27,6 +27,7 @@ sys.path.append(os.path.abspath("."))
 sys.path.append(os.path.abspath("src/models/mae"))   # needed for util.pos_embed
 from src.models.autoencoder import ConvAutoencoder
 from src.models.mae.models_mae import MaskedAutoencoderViT
+from src.models.mae_bottleneck import load_mae
 
 
 # ── architecture (must mirror train.py exactly) ───────────────────────────────
@@ -165,32 +166,19 @@ def main(args):
     imgs_np = data[pick].copy()                          # (N, 1, H, W)
     imgs    = torch.from_numpy(imgs_np).to(device)
 
-    # ── build model ───────────────────────────────────────────────────────
+    # ── build model + load weights ───────────────────────────────────────
+    # load_mae auto-detects whether this checkpoint has the clustering
+    # bottleneck (old runs) or not (current default) and builds accordingly.
     print(f"Building model : {args.autoencoder_model}")
     if args.autoencoder_model == "cae":
         model = ConvAutoencoder(latent_dim=args.latent_dim).to(device)
+        print(f"Loading weights: {args.model}")
+        state = torch.load(args.model, map_location=device)
+        model.load_state_dict(state, strict=True)
     else:
-        model = MaskedAutoencoderViT(**MAE_KWARGS).to(device)
+        print(f"Loading weights: {args.model}")
+        model = load_mae(checkpoint_path=args.model, device=device, **MAE_KWARGS)
 
-    # ── load weights ──────────────────────────────────────────────────────
-    print(f"Loading weights: {args.model}")
-    state = torch.load(args.model, map_location=device)
-
-    # validate key shapes before loading
-    if args.autoencoder_model == "mae":
-        ckpt_pos = state.get("pos_embed", state.get("module.pos_embed"))
-        if ckpt_pos is not None:
-            model_pos = model.pos_embed
-            if ckpt_pos.shape != model_pos.shape:
-                raise ValueError(
-                    f"pos_embed shape mismatch:\n"
-                    f"  checkpoint : {ckpt_pos.shape}\n"
-                    f"  model      : {model_pos.shape}\n"
-                    f"Check that img_size and patch_size in MAE_KWARGS "
-                    f"match the training configuration."
-                )
-
-    model.load_state_dict(state, strict=True)
     model.eval()
     print("  Weights loaded ✅")
 
@@ -203,10 +191,12 @@ def main(args):
             reconstructions = recon[:, 0]
 
         else:  # mae
-            # forward returns (loss, pred, mask, latent)
+            # forward returns (loss, pred, mask) for plain models, or
+            # (loss, pred, mask, cls_bottleneck) for old bottleneck checkpoints.
             # pred : (B, n_patches, patch²·C)  — normalized per patch when norm_pix_loss=True
             # mask : (B, n_patches)  1=masked
-            _, pred, mask, _ = model(imgs, mask_ratio=args.mask_ratio)
+            output = model(imgs, mask_ratio=args.mask_ratio)
+            pred, mask = output[1], output[2]
 
             # ── denormalize pred (reverses norm_pix_loss normalization) ──
             # model.patchify: (B,C,H,W) → (B, n_patches, patch²·C)

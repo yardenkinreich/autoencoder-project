@@ -5,13 +5,13 @@ __pycache__/
 *.ipynb_checkpoints
 
 results/
-data/
-data/processed/
-data/processed_filter
-data/test_processing/test_craters.npy
+/data/
+/data/processed/
+/data/processed_filter
+/data/test_processing/test_craters.npy
 .DS_Store
 .vscode/
-data/processed/*.npy
+/data/processed/*.npy
 code_scribbles
 logs/
 .snakefile

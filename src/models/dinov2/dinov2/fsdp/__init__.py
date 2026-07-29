@@ -64,6 +64,17 @@ def is_sharded_fsdp(x):
 
 def free_if_fsdp(x):
     if is_sharded_fsdp(x):
+        # ._handles is a private FSDP attribute this was written against on
+        # an older PyTorch; newer FSDP (torch 2.7.1 here) doesn't expose it.
+        # This call is an early-reshard memory optimization for FULL_SHARD -
+        # releasing temporarily-gathered parameters right after the
+        # teacher's forward pass, since the teacher needs no gradients.
+        # Under SHARD_GRAD_OP (what this project's configs actually use -
+        # see ssl_default_config.yaml), parameters are never sharded in the
+        # first place (only gradients/optimizer state are), so there's
+        # nothing to reshard here regardless. Safe to skip.
+        if not hasattr(x, "_handles"):
+            return
         handles = x._handles
         true_list = [True for h in handles]
         _reshard(x, handles, true_list)

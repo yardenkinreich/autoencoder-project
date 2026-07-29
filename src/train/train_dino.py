@@ -27,7 +27,7 @@ import torch
 
 from src.models.dinov2.dinov2.utils.config import setup
 from src.models.dinov2.dinov2.train.ssl_meta_arch import SSLMetaArch
-from src.models.dinov2.dinov2.train.train import do_train
+from src.models.dinov2.dinov2.train.train import do_train, do_test
 
 
 def main(args):
@@ -50,6 +50,13 @@ def main(args):
     model.prepare_for_distributed_training()
 
     do_train(cfg, model, resume=not args.no_resume)
+
+    # do_train() only saves via FSDPCheckpointer, whose LOCAL_STATE_DICT
+    # format is for resuming training on the same sharding topology, not
+    # portable loading elsewhere (see src/models/dino_backbone.py). Always
+    # save one clean, inference-ready checkpoint at the end, using the same
+    # method DINOv2's own do_test() uses periodically during training.
+    do_test(cfg, model, "final")
 
 
 if __name__ == "__main__":

@@ -207,14 +207,15 @@ rule preprocess_craters_dino:
 
 
 rule train_dino:
-    # FSDPCheckpointer names checkpoints "{name}.rank_{rank}.pth" and saves
-    # each rank's LOCAL shard - at DINO_GPUS=1 that's the whole model, but
-    # if DINO_GPUS is ever raised this rule's single-file output would need
-    # to become a consolidation step over one file per rank instead.
+    # train_dino.py saves two things: model_final.rank_N.pth (FSDPCheckpointer,
+    # LOCAL_STATE_DICT - for resuming training on the same GPU topology, not
+    # portable) and eval/final/teacher_checkpoint.pth (do_test(), a clean
+    # portable checkpoint - see src/models/dino_backbone.py). Track the
+    # latter, since that's what downstream encode/cluster actually loads.
     input:
         data = f"{DINO_INPUT_DIR}/craters_wide.dat"
     output:
-        model = f"{DINO_RUN_DIR}/model_final.rank_0.pth"
+        model = f"{DINO_RUN_DIR}/eval/final/teacher_checkpoint.pth"
     params:
         output_dir = DINO_RUN_DIR,
         epochs     = DINO_EPOCHS,

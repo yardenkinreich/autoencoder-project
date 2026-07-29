@@ -26,6 +26,7 @@ sys.path.append(os.path.abspath("."))
 sys.path.append(os.path.abspath("src/models/mae"))   # for util.pos_embed
 from src.models.autoencoder import ConvAutoencoder
 from src.models.mae_bottleneck import load_mae, encode_for_clustering
+from src.models.dino_backbone import load_dino_backbone
 
 # ── architecture — must mirror train.py exactly ───────────────────────────────
 INPUT_SIZE = 128      # ← was 224; matches OUTPUT_SIZE in preprocess.py
@@ -60,6 +61,11 @@ def build_model(autoencoder_model: str, bottleneck: int,
         model.to(device).eval()
         return model
 
+    if autoencoder_model == "dino":
+        # bottleneck is unused here — DINO's embedding dim is fixed by the
+        # architecture (384 for vit_small), not user-settable via this flag.
+        return load_dino_backbone(model_path, device=device)
+
     # mae — load_mae auto-detects whether this checkpoint has the clustering
     # bottleneck (old runs) or not (current default) and builds accordingly.
     model = load_mae(checkpoint_path=model_path, device=device, **MAE_KWARGS)
@@ -68,10 +74,15 @@ def build_model(autoencoder_model: str, bottleneck: int,
 
 
 # ── encoding helpers ──────────────────────────────────────────────────────────
-# _encode_mae_batch: thin wrapper so build_model()/encode_images() below can
-# dispatch on autoencoder_model without an if/else at every call site.
+# thin wrappers so build_model()/encode_images() below can dispatch on
+# autoencoder_model without an if/else at every call site.
 def _encode_mae_batch(model, imgs: torch.Tensor) -> torch.Tensor:
     return encode_for_clustering(model, imgs)
+
+
+def _encode_dino_batch(model, imgs: torch.Tensor) -> torch.Tensor:
+    with torch.no_grad():
+        return model(imgs)   # normalized CLS token (see src/models/dino_backbone.py)
 
 
 def _encode_cae_batch(model: ConvAutoencoder,
@@ -111,8 +122,12 @@ def encode_images(
     autoencoder_model: str = "mae",
     is_dataloader: bool = False,
 ):
-    model   = build_model(autoencoder_model, bottleneck, model_path, device)
-    encode  = _encode_mae_batch if autoencoder_model == "mae" else _encode_cae_batch
+    model  = build_model(autoencoder_model, bottleneck, model_path, device)
+    encode = {
+        "mae":  _encode_mae_batch,
+        "dino": _encode_dino_batch,
+        "cae":  _encode_cae_batch,
+    }[autoencoder_model]
 
     if is_dataloader:
         latents_list = []
@@ -217,7 +232,7 @@ if __name__ == "__main__":
     enc = sub.add_parser("encode")
     enc.add_argument("--imgs-dir",          required=True)
     enc.add_argument("--model",             required=True)
-    enc.add_argument("--autoencoder-model", choices=["cae", "mae"], required=True)
+    enc.add_argument("--autoencoder-model", choices=["cae", "mae", "dino"], required=True)
     enc.add_argument("--bottleneck",        type=int,   default=6)
     enc.add_argument("--out-latents",       required=True)
     enc.add_argument("--out-states",        required=True)

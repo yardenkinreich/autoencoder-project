@@ -16,6 +16,49 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
 from sklearn.metrics import confusion_matrix
+from sklearn.decomposition import PCA
+
+
+def plot_latent_separation(latents: np.ndarray, df: pd.DataFrame,
+                           class_names: list[str], out_path: str,
+                           technique: str = "pca"):
+    """
+    2D projection of the latent space, colored by TRUE label and by
+    PREDICTED label side by side — the direct visual answer to "how
+    separated are the classes, and does the model's own clustering agree?"
+    Complements the scalar geometry_comparison/boundary_uncertainty metrics
+    with something you can actually look at.
+    """
+    if technique == "pca":
+        proj = PCA(n_components=2, random_state=0)
+        coords = proj.fit_transform(latents)
+        ev = proj.explained_variance_ratio_
+        xlabel, ylabel = f"PC1 ({ev[0]*100:.1f}%)", f"PC2 ({ev[1]*100:.1f}%)"
+    elif technique == "tsne":
+        from sklearn.manifold import TSNE
+        coords = TSNE(n_components=2, random_state=0).fit_transform(latents)
+        xlabel, ylabel = "t-SNE 1", "t-SNE 2"
+    else:
+        raise ValueError(f"unknown technique: {technique}")
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    cmap = plt.cm.get_cmap("tab10")
+
+    for ax, col, title in [(axes[0], "true_label", "True label"),
+                           (axes[1], "pred_label", "Predicted (aligned)")]:
+        for v in sorted(df[col].unique()):
+            mask = (df[col] == v).to_numpy()
+            ax.scatter(coords[mask, 0], coords[mask, 1], s=30, alpha=0.7,
+                      color=cmap(v % 10), label=class_names[v] if v < len(class_names) else str(v))
+        ax.set_title(title)
+        ax.set_xlabel(xlabel); ax.set_ylabel(ylabel)
+        ax.legend(fontsize=8)
+
+    plt.suptitle(f"Latent space separation ({technique.upper()})", fontsize=13)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
 
 
 def plot_confusion_matrix(df: pd.DataFrame, class_names: list[str], out_path: str):

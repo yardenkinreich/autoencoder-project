@@ -18,6 +18,11 @@ Outputs (under --out):
                                   confusion_matrix.png, clusters_by_sample.png
     holdout/                     reconstruction_loss.json (mae/cae only),
                                   cluster_quality.json
+    runs/eval_history.csv        one row appended per run (every architecture/
+                                  checkpoint you've ever evaluated) so you can
+                                  compare against the best-so-far. See
+                                  `python -m eval.history --metric <col>`
+                                  to list the top runs by any metric.
 
 Nothing here knows how craters became clusters — swap the checkpoint/
 architecture freely and rerun. New metric -> new function in metrics.py ->
@@ -35,6 +40,7 @@ from eval import pipeline as P
 from eval import metrics as M
 from eval import visualize as V
 from eval import holdout as H
+from eval import history as HIST
 
 
 def evaluate_labeled_set(name: str, imgs_dir: str, checkpoint: str,
@@ -92,6 +98,7 @@ def evaluate_labeled_set(name: str, imgs_dir: str, checkpoint: str,
 
     V.plot_confusion_matrix(df, scheme.names, os.path.join(out_dir, "confusion_matrix.png"))
     V.display_craters_by_cluster(df, imgs_dir, os.path.join(out_dir, "clusters_by_sample.png"))
+    V.plot_latent_separation(latents, df, scheme.names, os.path.join(out_dir, "latent_separation.png"))
     _write_labeled_report(out_dir, results, cm, pc, scheme, cal)
 
     return results
@@ -130,6 +137,11 @@ def main():
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--skip-holdout", action="store_true",
                     help="skip the held-out set (e.g. if preprocess_holdout_set hasn't run yet)")
+    ap.add_argument("--history", default="runs/eval_history.csv",
+                    help="CSV that every run appends a summary row to, for "
+                         "comparing against the best run so far")
+    ap.add_argument("--no-history", action="store_true",
+                    help="don't append this run to --history")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -164,6 +176,9 @@ def main():
               indent=2, default=float)
     _write_summary_md(args.out, all_results)
     print(f"\nWrote summary to {args.out}/summary.json, {args.out}/summary.md")
+
+    if not args.no_history:
+        HIST.append_to_history(all_results, args.history)
 
 
 def _print_summary(name, results):
@@ -208,7 +223,8 @@ def _write_labeled_report(out, r, cm, pc, scheme, cal):
     L.append(pc.round(3).to_markdown())
     L.append("\n## Confusion matrix (rows=true, cols=pred)\n")
     L.append(pd.DataFrame(cm, index=scheme.names, columns=scheme.names).to_markdown())
-    L.append("\nSee confusion_matrix.png and clusters_by_sample.png alongside this report.")
+    L.append("\nSee confusion_matrix.png, clusters_by_sample.png and "
+             "latent_separation.png alongside this report.")
     open(os.path.join(out, "report.md"), "w").write("\n".join(L))
 
 

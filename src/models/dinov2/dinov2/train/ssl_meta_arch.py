@@ -348,9 +348,15 @@ class SSLMetaArch(nn.Module):
     def fsdp_synchronize_streams(self):
         if self.need_to_synchronize_fsdp_streams:
             torch.cuda.synchronize()
-            self.student.dino_head._streams = (
-                self.teacher.dino_head._streams
-            ) = self.student.backbone._streams = self.teacher.backbone._streams
+            # ._streams is a private FSDP attribute this was written against
+            # on an older PyTorch; newer FSDP (torch 2.7.1 here) doesn't
+            # expose it. It's a stream-sharing perf optimization for
+            # cross-shard async overlap, not correctness-critical -
+            # torch.cuda.synchronize() above already covers correctness.
+            if hasattr(self.teacher.backbone, "_streams"):
+                self.student.dino_head._streams = (
+                    self.teacher.dino_head._streams
+                ) = self.student.backbone._streams = self.teacher.backbone._streams
             self.need_to_synchronize_fsdp_streams = False
 
     def update_teacher(self, m):

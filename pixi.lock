@@ -668,7 +668,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/xcb-util-renderutil-0.3.10-hb711507_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/xcb-util-wm-0.4.2-hb711507_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/xerces-c-3.2.5-h988505b_2.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/xformers-0.0.31.post1-cuda_129py311h5026eb6_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/xformers-0.0.30-cuda_129py311h5026eb6_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/xkeyboard-config-2.46-hb03c661_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/xorg-libice-1.1.2-hb9d3cd8_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/xorg-libsm-1.2.6-he73a12e_0.conda
@@ -10366,28 +10366,28 @@ packages:
   purls: []
   size: 1648243
   timestamp: 1727733890754
-- conda: https://conda.anaconda.org/conda-forge/linux-64/xformers-0.0.31.post1-cuda_129py311h5026eb6_0.conda
-  sha256: a5a78c1c734d553a3e092f86ef6d1f0553692a176d419827ff5093377b20d81b
-  md5: 3c41ecf7ff1a86a2ba3a01431bcbf9d3
+- conda: https://conda.anaconda.org/conda-forge/linux-64/xformers-0.0.30-cuda_129py311h5026eb6_0.conda
+  sha256: 382d72d83919cb92dceb60dc7da70b163b473e9e9552c3e6bb2373f3800655dd
+  md5: e60a15ddd87f0b135976001ecc741d93
   depends:
   - python
   - numpy
   - pyre-extensions >=0.0.29
   - pytorch * cuda*
   - cuda-driver-dev
-  - libstdcxx >=14
-  - libgcc >=14
   - __glibc >=2.17,<3.0.a0
   - cuda-version >=12.9,<13
+  - libstdcxx >=14
+  - libgcc >=14
   - cuda-cudart >=12.9.79,<13.0a0
-  - python_abi 3.11.* *_cp311
   - pytorch >=2.7.1,<2.8.0a0
   - libtorch >=2.7.1,<2.8.0a0
+  - python_abi 3.11.* *_cp311
   license: BSD-3-Clause AND Apache-2.0
   purls:
   - pkg:pypi/xformers?source=hash-mapping
-  size: 169156372
-  timestamp: 1753338140308
+  size: 13252881
+  timestamp: 1756680718108
 - conda: https://conda.anaconda.org/conda-forge/linux-64/xkeyboard-config-2.46-hb03c661_0.conda
   sha256: aa03b49f402959751ccc6e21932d69db96a65a67343765672f7862332aa32834
   md5: 71ae752a748962161b4740eaff510258

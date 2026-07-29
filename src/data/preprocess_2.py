@@ -123,9 +123,21 @@ def _to_360(lon):
     return lon % 360.0
 
 
+def load_holdout_crater_ids(path):
+    """
+    Read a held-out crater ID registry — one CRATER_ID per line, or a CSV
+    with a CRATER_ID column (only that column is used; extra columns, e.g.
+    a `source` label per set, are ignored here).
+    """
+    if path.endswith(".csv"):
+        return set(pd.read_csv(path)["CRATER_ID"].astype(str))
+    with open(path) as f:
+        return {line.strip() for line in f if line.strip()}
+
+
 def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
                              latitude_bounds, craters_to_output,
-                             exclude_lon_bounds=None):
+                             exclude_lon_bounds=None, exclude_crater_ids=None):
     """
     Filter the crater catalog by diameter and latitude, and optionally drop a
     longitude band corrupted by mosaic stitching (the WAC morphology mosaic has
@@ -138,6 +150,13 @@ def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
         (300, 60) excludes 300°→360° and 0°→60°). Bounds given in the -180..180
         convention are accepted and normalised internally, so e.g. (-180, -120)
         works as well as (180, 240).
+
+    exclude_crater_ids : path to a held-out crater ID registry (see
+        load_holdout_crater_ids). Applied BEFORE craters_to_output subsampling,
+        so held-out craters are guaranteed to never appear in ANY training
+        run's sample regardless of which subset gets drawn — this is what
+        keeps eval sets (Julie's, etc.) actually held out rather than
+        possibly already seen during training by chance.
     """
     craters = pd.read_csv(craters_csv)
     filtered = craters[
@@ -158,6 +177,13 @@ def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
         filtered = filtered[~in_band]
         print(f"Excluded longitude band [{lo:.1f}°, {hi:.1f}°] E "
               f"→ dropped {n_before - len(filtered)} of {n_before} craters")
+
+    if exclude_crater_ids is not None:
+        holdout_ids = load_holdout_crater_ids(exclude_crater_ids)
+        n_before = len(filtered)
+        filtered = filtered[~filtered['CRATER_ID'].astype(str).isin(holdout_ids)]
+        print(f"Excluded {n_before - len(filtered)} held-out craters "
+              f"(from {exclude_crater_ids}, registry has {len(holdout_ids)} IDs)")
 
     if craters_to_output > 0:
         filtered = filtered.sample(n=craters_to_output, random_state=42)
@@ -401,6 +427,13 @@ if __name__ == '__main__':
                              "[lo, hi] band, e.g. the seam strip. Accepts -180..180 "
                              "or 0..360; may wrap (lo>hi). Omit to keep all longitudes.")
     parser.add_argument('--craters_to_output',    type=int,   default=-1)
+    parser.add_argument('--exclude_crater_ids',   default=None,
+                        help="Path to a held-out crater ID registry (one CRATER_ID "
+                             "per line, or a CSV with a CRATER_ID column). Applied "
+                             "before --craters_to_output subsampling, so these craters "
+                             "never appear in training data regardless of which subset "
+                             "gets drawn. Use for any crater set reserved for eval "
+                             "(e.g. configs/holdout_crater_ids.csv).")
     parser.add_argument('--save_raw_crops',       action='store_true')
     parser.add_argument('--save_np_array',        action='store_true')
     parser.add_argument('--autoencoder_model',    type=str,
@@ -436,6 +469,7 @@ if __name__ == '__main__':
         args.craters_csv, args.min_diameter, args.max_diameter,
         args.latitude_bounds, args.craters_to_output,
         exclude_lon_bounds=args.exclude_lon_bounds,
+        exclude_crater_ids=args.exclude_crater_ids,
     )
     print(f"Filtered {len(filtered)} craters")
 

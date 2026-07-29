@@ -93,7 +93,8 @@ rule preprocess_craters:
     input:
         map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
         craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
-        scaling_json = "configs/global_scaling.json"
+        scaling_json = "configs/global_scaling.json",
+        holdout_ids  = "configs/holdout_crater_ids.csv"
     output:
         output_dir_clean = directory(f"{INPUT_DIR}/crater_crops_clean"),
         output_dir_aug   = directory(f"{INPUT_DIR}/crater_crops_aug"),
@@ -125,6 +126,7 @@ rule preprocess_craters:
             --save_np_array \
             --autoencoder_model {params.autoencoder_model} \
             --exclude_lon_bounds 180 270 \
+            --exclude_crater_ids {input.holdout_ids} \
             --norm_mode global \
             --scaling_json {input.scaling_json}
 
@@ -176,7 +178,8 @@ rule preprocess_craters_dino:
     input:
         map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
         craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
-        scaling_json = "configs/global_scaling.json"
+        scaling_json = "configs/global_scaling.json",
+        holdout_ids  = "configs/holdout_crater_ids.csv"
     output:
         output_dir_clean = directory(f"{DINO_INPUT_DIR}/crater_crops"),
         np_output_clean  = f"{DINO_INPUT_DIR}/craters_wide.dat",
@@ -205,6 +208,7 @@ rule preprocess_craters_dino:
             --save_np_array \
             --autoencoder_model mae \
             --exclude_lon_bounds 180 270 \
+            --exclude_crater_ids {input.holdout_ids} \
             --norm_mode global \
             --scaling_json {input.scaling_json}
         """

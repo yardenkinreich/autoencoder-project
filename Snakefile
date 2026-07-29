@@ -57,6 +57,18 @@ RUN_CLUSTER_JULIE = True
 TRAIN_LAUNCHER = (f"torchrun --standalone --nproc_per_node={NUM_GPUS}"
                   if NUM_GPUS > 1 else "python")
 
+# --- DINOv2 (separate opt-in pipeline: `snakemake train_dino`) ---
+# DINO isn't part of `rule all` — it's a different training paradigm
+# (self-distillation, not reconstruction) with its own checkpoint format;
+# see src/train/train_dino.py and configs/dino_craters.yaml.
+DINO_GPUS         = 1     # DINOv2's do_train() always needs torchrun, even at 1 (see train_dino.py)
+DINO_EPOCHS       = 100
+DINO_CLEAN_OFFSET = 1.0   # ~2x diameter FOV (vs MAE's 0.5) — see preprocess_2.py --clean_offset
+
+DINO_INPUT_DIR = f"{os.path.dirname(os.path.dirname(INPUT_DIR))}/dino_wide"
+DINO_RUN_NAME  = f"d{MIN_DIAMETER:g}-{MAX_DIAMETER:g}_ep{DINO_EPOCHS}"
+DINO_RUN_DIR   = f"logs/dino/{DATA_TAG}_wide/{DINO_RUN_NAME}"
+
 # --- Rule all ---
 rule all:
     input:
@@ -151,6 +163,65 @@ rule train_autoencoder:
             --mask_ratio {params.mask_ratio} \
             --latent_dim {params.latent_dim} \
             $([ -n "{params.pretrained}" ] && echo "--pretrained_weights {params.pretrained}")
+        """
+
+
+# --- DINOv2 (opt-in: `snakemake train_dino`) ---
+
+rule preprocess_craters_dino:
+    input:
+        map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
+        craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
+        scaling_json = "configs/global_scaling.json"
+    output:
+        output_dir_clean = directory(f"{DINO_INPUT_DIR}/crater_crops"),
+        np_output_clean  = f"{DINO_INPUT_DIR}/craters_wide.dat",
+        metadata_output  = f"{DINO_INPUT_DIR}/metadata.csv"
+    params:
+        min_diameter      = MIN_DIAMETER,
+        max_diameter      = MAX_DIAMETER,
+        lat_min           = -60,
+        lat_max           = 60,
+        craters_to_output = -1,
+        clean_offset      = DINO_CLEAN_OFFSET
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/data/preprocess_2.py \
+            --map_file {input.map_file} \
+            --craters_csv {input.craters_csv} \
+            --output_dir_clean {output.output_dir_clean} \
+            --np_output_path_clean {output.np_output_clean} \
+            --info_output_path {output.metadata_output} \
+            --min_diameter {params.min_diameter} \
+            --max_diameter {params.max_diameter} \
+            --latitude_bounds {params.lat_min} {params.lat_max} \
+            --craters_to_output {params.craters_to_output} \
+            --clean_offset {params.clean_offset} \
+            --save_raw_crops \
+            --save_np_array \
+            --autoencoder_model mae \
+            --exclude_lon_bounds 180 270 \
+            --norm_mode global \
+            --scaling_json {input.scaling_json}
+        """
+
+
+rule train_dino:
+    input:
+        data = f"{DINO_INPUT_DIR}/craters_wide.dat"
+    output:
+        model = f"{DINO_RUN_DIR}/model_final.pth"
+    params:
+        output_dir = DINO_RUN_DIR,
+        epochs     = DINO_EPOCHS,
+        num_gpus   = DINO_GPUS
+    shell:
+        """
+        PYTHONPATH=$(pwd) torchrun --standalone --nproc_per_node={params.num_gpus} \
+            src/train/train_dino.py \
+            --input {input.data} \
+            --output_dir {params.output_dir} \
+            --epochs {params.epochs}
         """
 
 

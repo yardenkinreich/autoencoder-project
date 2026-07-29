@@ -1,0 +1,48 @@
+# DINOv2 self-supervised pretraining on crater crops.
+# Partial override merged on top of dinov2/configs/ssl_default_config.yaml
+# (via OmegaConf.merge in dinov2/utils/config.py) — only fields that need
+# to differ from the ImageNet/photo defaults are listed here.
+#
+# train.dataset_path is intentionally left out: src/train/train_dino.py
+# sets it from --input at runtime (Craters:root=<path to craters_*.dat>),
+# same pattern as train.py's --input flag, instead of a hardcoded path here.
+
+student:
+  arch: vit_small        # 384-dim, 21M params — appropriate for ~15-25k crops, not ImageNet-22k
+  patch_size: 8           # matches MAE's setup for this same data (preprocess_2.py OUTPUT_SIZE=128)
+  in_chans: 1              # grayscale, no fake RGB replication
+  channel_adaptive: false
+  drop_path_rate: 0.1     # lighter regularization than the vit_large default (0.3) — smaller model, smaller data
+
+teacher:
+  in_chans: 1
+  channel_adaptive: false
+
+dino:
+  head_n_prototypes: 4096  # default 65536 is tuned for ImageNet-22k/LVD-142M scale, not ~15-25k crops
+
+crops:
+  global_crops_scale: [0.6, 1.0]    # narrowed from stock [0.32, 1.0]
+  local_crops_scale: [0.25, 0.6]    # narrowed from stock [0.05, 0.32]
+  global_crops_size: 128            # matches OUTPUT_SIZE in preprocess_2.py — no upsampling past real resolution
+  local_crops_size: 64
+  local_crops_number: 6
+  # NOTE: the *narrowed* scales above are deliberately paired with the WIDER
+  # crop geometry preprocess_2.py's --clean_offset=~1.0 already produces
+  # (vs MAE's 0.5) — local crops zoom into a real ~0.5-1.2x-diameter region
+  # instead of an arbitrary sub-patch of an already-tight 128px crater crop.
+
+train:
+  batch_size_per_gpu: 128
+  num_workers: 4
+  OFFICIAL_EPOCH_LENGTH: 200   # ~1 real pass over ~15-25k craters at batch 128 (dataset is sampled infinitely, not literally epoch-bounded)
+  saveckp_freq: 10
+  crater_augmentation: true    # see do_train() patch — selects CraterAugmentationDINO
+
+optim:
+  epochs: 100                  # 100 * 200 = 20,000 iterations total — a tractable from-scratch budget for this dataset scale
+  warmup_epochs: 10
+  freeze_last_layer_epochs: 1
+
+evaluation:
+  eval_period_iterations: 2000

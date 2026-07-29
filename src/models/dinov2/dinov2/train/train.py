@@ -11,6 +11,7 @@ from functools import partial
 
 from fvcore.common.checkpoint import PeriodicCheckpointer
 import torch
+from torch.utils.tensorboard import SummaryWriter
 
 from src.models.dinov2.dinov2.data import SamplerType, make_data_loader, make_dataset
 from src.models.dinov2.dinov2.data import collate_data_and_cast, DataAugmentationDINO, CellAugmentationDINO, MaskingGenerator
@@ -21,6 +22,7 @@ from src.models.dinov2.dinov2.utils.config import setup
 from src.models.dinov2.dinov2.utils.utils import CosineScheduler
 
 from src.models.dinov2.dinov2.train.ssl_meta_arch import SSLMetaArch
+from src.data.dino_craters_augmentation import CraterAugmentationDINO
 
 
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
@@ -172,7 +174,15 @@ def do_train(cfg, model, resume=False):
         max_num_patches=0.5 * img_size // patch_size * img_size // patch_size,
     )
 
-    if cfg.train.cell_augmentation:
+    if cfg.train.get("crater_augmentation", False):
+        data_transform = CraterAugmentationDINO(
+            cfg.crops.global_crops_scale,
+            cfg.crops.local_crops_scale,
+            cfg.crops.local_crops_number,
+            global_crops_size=cfg.crops.global_crops_size,
+            local_crops_size=cfg.crops.local_crops_size,
+        )
+    elif cfg.train.cell_augmentation:
         data_transform = CellAugmentationDINO(
             cfg.crops.global_crops_scale,
             cfg.crops.local_crops_scale,
@@ -227,6 +237,13 @@ def do_train(cfg, model, resume=False):
     metrics_file = os.path.join(cfg.train.output_dir, "training_metrics.json")
     metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
     header = "Training"
+
+    # live loss monitoring: tensorboard --logdir <output_dir>/tensorboard
+    tb_writer = None
+    if distributed.is_main_process():
+        tb_dir = os.path.join(cfg.train.output_dir, "tensorboard")
+        tb_writer = SummaryWriter(log_dir=tb_dir)
+        logger.info(f"TensorBoard  -> tensorboard --logdir {tb_dir}")
 
     for data in metric_logger.log_every(
         data_loader,
@@ -291,6 +308,15 @@ def do_train(cfg, model, resume=False):
         metric_logger.update(current_batch_size=current_batch_size)
         metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
 
+        if tb_writer is not None:
+            tb_writer.add_scalar("Loss/total", losses_reduced, iteration)
+            for k, v in loss_dict_reduced.items():
+                tb_writer.add_scalar(f"Loss/{k}", v, iteration)
+            tb_writer.add_scalar("LR", lr, iteration)
+            tb_writer.add_scalar("WD", wd, iteration)
+            tb_writer.add_scalar("teacher_momentum", mom, iteration)
+            tb_writer.add_scalar("teacher_temp", teacher_temp, iteration)
+
         # checkpointing and testing
 
         if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
@@ -299,6 +325,9 @@ def do_train(cfg, model, resume=False):
         periodic_checkpointer.step(iteration)
 
         iteration = iteration + 1
+
+    if tb_writer is not None:
+        tb_writer.close()
     metric_logger.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 

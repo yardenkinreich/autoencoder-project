@@ -7,6 +7,13 @@ Unlike pipeline.py's labeled-set eval, there's no ground truth here — these
 metrics answer "how good is the model on data it never trained on", not
 "does it recover known classes". Works alongside pipeline.py's labeled-set
 metrics rather than replacing them.
+
+load_holdout_dat()/embed_holdout() are also the memmap-embedding primitives
+for any OTHER craters.dat/metadata.csv pair produced by preprocess_2.py's
+--only_crater_ids path — e.g. the labeled new-test-set set (see
+`snakemake preprocess_new_test_set`, eval/pipeline.py's
+labels_from_memmap_csv(), and evaluate.py's evaluate_labeled_set()) — not
+just the one unlabeled holdout set the module name suggests.
 """
 from __future__ import annotations
 import os
@@ -100,17 +107,33 @@ def unsupervised_cluster_quality(latents: np.ndarray, n_clusters: int, seed: int
 
 
 def embed_holdout(dat_path: str, checkpoint: str, autoencoder_model: str,
-                  device: str = "cuda", batch_size: int = 64) -> np.ndarray:
-    """Embeddings for the held-out set — works for mae/cae/dino alike."""
+                  device: str = "cuda", batch_size: int = 64,
+                  row_idx: np.ndarray | None = None) -> np.ndarray:
+    """Embeddings for a memmap of this module's format — works for
+    mae/cae/dino alike. Used both for the unlabeled holdout set (all rows)
+    and for a labeled memmap-based set (row_idx = the subset that has a
+    recognized label — see pipeline.labels_from_memmap_csv), since both are
+    craters.dat/metadata.csv pairs produced the same way by preprocess_2.py."""
     import torch
-    from src.cluster.cluster import build_model, ENCODE_FNS
+    import torch.nn.functional as F
+    from src.cluster.cluster import build_model, model_input_size, ENCODE_FNS
 
     data = load_holdout_dat(dat_path)
+    if row_idx is not None:
+        data = data[np.asarray(row_idx)]
     model = build_model(autoencoder_model, bottleneck=64, model_path=checkpoint, device=device)
     encode = ENCODE_FNS[autoencoder_model]
+    # the memmap itself is physically stored at load_holdout_dat's fixed
+    # size (128) - unlike pipeline.embed()'s PNG path, there's no re-reading
+    # at a different native resolution, so a model expecting something else
+    # (see cluster.model_input_size's docstring) needs an actual resize here.
+    target_size = model_input_size(model)
 
     latents = []
     for i in range(0, len(data), batch_size):
         batch = torch.from_numpy(np.array(data[i:i + batch_size])).to(device)
+        if target_size != batch.shape[-1]:
+            batch = F.interpolate(batch, size=(target_size, target_size),
+                                  mode="bilinear", align_corners=False)
         latents.append(encode(model, batch).cpu().numpy())
     return np.concatenate(latents, axis=0)

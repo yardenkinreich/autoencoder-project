@@ -40,12 +40,20 @@ class CraterAugmentationDINO(object):
         local_crops_number,
         global_crops_size=128,
         local_crops_size=64,
+        in_chans=1,
     ):
         self.global_crops_scale = global_crops_scale
         self.local_crops_scale = local_crops_scale
         self.local_crops_number = local_crops_number
         self.global_crops_size = global_crops_size
         self.local_crops_size = local_crops_size
+        # our .dat files are always 1-channel on disk; in_chans>1 (e.g. 3, to
+        # match a stock ImageNet-pretrained checkpoint we're warm-starting
+        # from) replicates the single channel rather than requiring a
+        # separate re-preprocessed 3-channel dataset. RandomResizedCrop
+        # below already resizes to global/local_crops_size regardless of the
+        # raw 128px input, so no separate resize step is needed either.
+        self.in_chans = in_chans
 
         def geometric(size, scale):
             return transforms.Compose([
@@ -68,6 +76,9 @@ class CraterAugmentationDINO(object):
         ])
 
     def __call__(self, image):
+        if self.in_chans > 1 and image.shape[0] == 1:
+            image = image.repeat(self.in_chans, 1, 1)
+
         output = {}
 
         global_crop_1 = self.photometric(self.geometric_global(image))

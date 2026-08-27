@@ -46,11 +46,13 @@ omegaconf = ">=2.3.0,<3"
 fvcore = ">=0.1.5.post20221221,<0.2"
 iopath = ">=0.1.10,<0.2"
 submitit = ">=1.5.4,<2"
+curl = ">=8.18.0,<9"
 
 [pypi-dependencies]
 snakemake = "*"
 torchsummary = "*"
 cupy-cuda12x = ">=13.0.0"
+streamlit = "*"
 
 [system-requirements]
 cuda = "13" 

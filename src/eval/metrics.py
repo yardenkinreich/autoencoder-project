@@ -15,6 +15,8 @@ Checklist coverage:
   [x] Continuum evidence: SVM boundary uncertainty
 """
 from __future__ import annotations
+import os
+import re
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
@@ -78,6 +80,33 @@ def _class_probabilities(df: pd.DataFrame, mapping: dict, n_classes: int):
     conf = P.max(axis=1)
     pred = P.argmax(axis=1)
     return P, conf, pred
+
+
+def mean_average_precision(df: pd.DataFrame, mapping: dict, n_classes: int) -> float | None:
+    """
+    Mean Average Precision: per-class Average Precision (area under the
+    precision-recall curve for "is this crater class c?" using that class's
+    softmax score from _class_probabilities - the same distance-derived
+    scores ece() uses) averaged across classes. Unlike accuracy/F1, this
+    scores the RANKING quality of each class's confidence, not just the
+    argmax decision - a model that ranks true "Old" craters above non-Old
+    ones (even without a perfect threshold) scores well here. None if no
+    distance columns are available (same precondition as ece()).
+    """
+    from sklearn.metrics import average_precision_score
+
+    out = _class_probabilities(df, mapping, n_classes)
+    if out is None:
+        return None
+    P, _, _ = out
+    y = df["true_label"].to_numpy()
+    ap_per_class = []
+    for c in range(n_classes):
+        y_true_c = (y == c).astype(int)
+        if y_true_c.sum() == 0:
+            continue
+        ap_per_class.append(average_precision_score(y_true_c, P[:, c]))
+    return float(np.mean(ap_per_class)) if ap_per_class else None
 
 
 def ece(df: pd.DataFrame, mapping: dict, n_classes: int, n_bins: int = 10):
@@ -210,6 +239,162 @@ def geometry_comparison(latents: np.ndarray, df: pd.DataFrame) -> dict:
         corr, _ = spearmanr(gt_dists, pr_dists)
 
     return {"procrustes_disparity": float(disparity), "distance_correlation": float(corr)}
+
+
+# ---- confound check: does the cluster track known non-degradation features? ----
+
+def image_intensity_features(df: pd.DataFrame, imgs_dir: str) -> pd.DataFrame:
+    """
+    Per-crater brightness (mean pixel value), Sobel edge-magnitude (mean
+    gradient magnitude - a texture/sharpness proxy), and saturation fraction
+    (share of pixels clipped at the top of the 8-bit range - a sign the
+    normalization window is too tight for this crater, or it's genuinely
+    very bright) computed directly from the PNG. No metadata dependency,
+    always available regardless of whether crater_id maps to a real Robbins
+    ID.
+    """
+    import cv2
+    rows = []
+    for _, r in df.iterrows():
+        path = os.path.join(imgs_dir, r["filename"])
+        # a memmap-based set's display crop is a saved --save_raw_crops .npy
+        # tensor (num_channels, H, W), already float-normalized - not a PNG
+        # cv2.imread can read (it silently returns None for those).
+        if path.endswith(".npy"):
+            img = np.load(path)[0].astype(np.float32) * 255.0 if os.path.exists(path) else None
+        else:
+            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            rows.append({"crater_id": r["crater_id"], "brightness": np.nan, "sobel_mean": np.nan,
+                        "frac_saturated": np.nan})
+            continue
+        img = img.astype(np.float32)
+        gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
+        sobel_mag = np.sqrt(gx ** 2 + gy ** 2)
+        rows.append({
+            "crater_id": r["crater_id"],
+            "brightness": float(img.mean()),
+            "sobel_mean": float(sobel_mag.mean()),
+            "frac_saturated": float((img >= 254.0).mean()),
+        })
+    return pd.DataFrame(rows)
+
+
+_ROBBINS_ID_RE = re.compile(r"^\d{2}-\d-\d{6}$")
+
+
+def robbins_lookup_features(
+    df: pd.DataFrame,
+    robbins_csv: str = "data/raw/lunar_crater_database_robbins_2018.csv",
+) -> pd.DataFrame | None:
+    """
+    Diameter/lat/lon looked up from the Robbins catalog, ONLY for craters
+    whose crater_id matches Robbins' own ID format (NN-N-NNNNNN). Returns
+    None entirely if no crater_id in df matches that format - e.g. Julie's
+    set uses sequential filename indices, not real Robbins IDs, so this
+    gracefully no-ops there rather than guessing at a mapping that doesn't
+    exist (see session notes on the unresolved Julie's-ID-mapping gap).
+    """
+    ids = df["crater_id"].astype(str)
+    matches = ids.str.match(_ROBBINS_ID_RE)
+    if not matches.any():
+        return None
+    robbins = pd.read_csv(
+        robbins_csv, usecols=["CRATER_ID", "LAT_CIRC_IMG", "LON_CIRC_IMG", "DIAM_CIRC_IMG"])
+    robbins["CRATER_ID"] = robbins["CRATER_ID"].astype(str)
+    out = pd.DataFrame({"crater_id": ids[matches]}).merge(
+        robbins, left_on="crater_id", right_on="CRATER_ID", how="left")
+    return out.rename(columns={
+        "LAT_CIRC_IMG": "lat", "LON_CIRC_IMG": "lon", "DIAM_CIRC_IMG": "diam_km",
+    })[["crater_id", "lat", "lon", "diam_km"]]
+
+
+def latent_geo_correlation(latents: np.ndarray, df: pd.DataFrame,
+                           n_components: int = 2) -> dict | None:
+    """
+    Spearman (rank) correlation between the latent space's PCA components
+    and lat/lon, for craters with a real Robbins ID (via
+    robbins_lookup_features - None entirely if none match, e.g. Julie's
+    set). Spearman, not Pearson, to match this module's existing
+    non-parametric convention (confound_correlation's Kruskal-Wallis,
+    geometry_comparison's spearmanr) - rank-based, so it doesn't assume a
+    linear relationship or normally-distributed features, and is robust to
+    the odd outlier crater.
+
+    Complements confound_correlation()'s test (does a feature differ across
+    the DISCRETE cluster groups KMeans happened to draw?) with a direct,
+    CONTINUOUS one: does the embedding ITSELF vary smoothly with geography,
+    independent of where cluster boundaries land? A crater's exact lat/lon
+    should carry no degradation signal, so a strong |r| here (especially on
+    PC1, the axis latent_separation.png actually plots) is a red flag the
+    model may have partly learned "where on the Moon this is" instead of
+    "how eroded is this crater."
+    """
+    from sklearn.decomposition import PCA
+    from scipy.stats import spearmanr
+
+    robbins_feats = robbins_lookup_features(df)
+    if robbins_feats is None:
+        return None
+
+    proj = PCA(n_components=n_components, random_state=0).fit_transform(latents)
+    pc_cols = [f"pc{i + 1}" for i in range(n_components)]
+    pc_df = pd.DataFrame(proj, columns=pc_cols)
+    pc_df["crater_id"] = df["crater_id"].to_numpy()
+
+    merged = pc_df.merge(robbins_feats, on="crater_id", how="inner")
+    out = {}
+    for pc in pc_cols:
+        for geo in ("lat", "lon"):
+            sub = merged[[pc, geo]].dropna()
+            if len(sub) < 3:
+                out[f"{pc}_vs_{geo}"] = {"r": None, "p_value": None, "n": len(sub)}
+                continue
+            r, p = spearmanr(sub[pc], sub[geo])
+            out[f"{pc}_vs_{geo}"] = {"r": float(r), "p_value": float(p), "n": int(len(sub))}
+    return out
+
+
+def confound_correlation(df: pd.DataFrame, feature_df: pd.DataFrame,
+                         group_col: str = "cluster") -> dict:
+    """
+    For each feature column in feature_df (joined to df on crater_id), tests
+    whether it differs significantly across cluster groups via Kruskal-Wallis
+    (non-parametric one-way ANOVA) + epsilon-squared effect size (bounded
+    ANOVA-eta-squared analogue for the H statistic). A significant, large-
+    effect result for e.g. diameter or brightness is a red flag: the
+    clustering may be tracking that confound instead of genuine degradation
+    signal. group_col="cluster" tests the algorithm's own raw grouping;
+    pass "pred_label" instead to test the aligned classes.
+    """
+    from scipy.stats import kruskal
+
+    merged = df[["crater_id", group_col]].merge(feature_df, on="crater_id", how="inner")
+    groups = sorted(merged[group_col].unique())
+    out = {}
+    for col in feature_df.columns:
+        if col == "crater_id":
+            continue
+        vals_by_group = [merged.loc[merged[group_col] == g, col].dropna().to_numpy()
+                         for g in groups]
+        vals_by_group = [v for v in vals_by_group if len(v) > 0]
+        n = sum(len(v) for v in vals_by_group)
+        # kruskal() raises outright when every value pooled across groups is
+        # identical (e.g. frac_saturated=0.0 for literally every Julie
+        # crater - no PNG in that set ever saturates) - there's genuinely no
+        # confound signal to report there, not an error condition.
+        all_identical = n > 0 and len(np.unique(np.concatenate(vals_by_group))) < 2
+        if len(vals_by_group) < 2 or all_identical:
+            out[col] = {"h_stat": None, "p_value": None, "eta_sq": None, "n": n}
+            continue
+        h_stat, p_value = kruskal(*vals_by_group)
+        n = sum(len(v) for v in vals_by_group)
+        k = len(vals_by_group)
+        eta_sq = (h_stat - k + 1) / (n - k) if n > k else float("nan")
+        out[col] = {"h_stat": float(h_stat), "p_value": float(p_value),
+                    "eta_sq": float(eta_sq), "n": int(n)}
+    return out
 
 
 def boundary_uncertainty(latents: np.ndarray, df: pd.DataFrame) -> dict:

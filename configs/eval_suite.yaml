@@ -2,7 +2,7 @@
 # model run so comparisons are apples-to-apples. Per-run specifics
 # (checkpoint path, architecture) are CLI args, not here — see:
 #   python -m eval.evaluate --checkpoint ... --autoencoder-model {mae,cae,dino} \
-#       --config configs/eval_suite.yaml --out runs/eval/<run_name>
+#       --config configs/eval_suite.yaml [--out logs/.../<run>/eval_results/<run_name>]
 #
 # Distinct from configs/erosion4.yaml, which notebooks/evaluate_pipeline.ipynb
 # still uses directly for a quick single-set (Julie-only, MAE-only)
@@ -17,18 +17,52 @@ png_max: 255
 
 # Every labeled set here gets the FULL metric suite (accuracy/QWK/ordinal-MAE/
 # ECE/ARI/NMI/V-measure/geometry/boundary-uncertainty) computed against it.
-# ⚠️ imgs_dir must be at the SAME field-of-view the checkpoint's architecture
-# was trained on (MAE/CAE: offset 0.5; DINO: offset ~1.0 - see
-# src/eval/pipeline.py's module docstring). Don't point a dino checkpoint at
-# an MAE-FOV set.
+# Both sets below are cut at MAE/CAE's tight 0.5 offset. DINO trains on a
+# wider ~1.0 offset (see src/eval/pipeline.py's module docstring /
+# DINO_CLEAN_OFFSET), so evaluating a DINO checkpoint here means scoring it
+# on a narrower crop than it trained on - deliberate: it's a cross-FOV
+# robustness check (does the model still work on a different framing of the
+# same crater?), not a bug to avoid.
+#
+# Two different set "shapes":
+#   - {imgs_dir} only -> PNG-based (pipeline.labels_from_png_dir), the
+#     original julie convention: <crater_id>_<state>.png filenames.
+#   - {dat_path, metadata_csv, imgs_dir, labels_csv, class_names} ->
+#     memmap-based (pipeline.labels_from_memmap_csv), for a set
+#     materialized via `snakemake preprocess_new_test_set`-style rules -
+#     imgs_dir there is only used for display/confound-check crops (.npy),
+#     never for embedding (that reads dat_path directly). class_names
+#     overrides the top-level default above for this set only.
 labeled_sets:
   julie:
     imgs_dir: "data/raw/craters_for_danny"
-  # new_set:
-  #   imgs_dir: "..."   # add once available (lat/long list pending)
+  new_set:
+    dat_path: "data/processed_wac_100m_new/sigma/100/new_test_set/craters.dat"
+    metadata_csv: "data/processed_wac_100m_new/sigma/100/new_test_set/metadata.csv"
+    imgs_dir: "data/processed_wac_100m_new/sigma/100/new_test_set/crater_crops"
+    labels_csv: "configs/correct_crater_with_labels_final.csv"
+    class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+  # Same set/FOV/labels as new_set, restricted to the "final_test" half of
+  # configs/new_test_set_split.csv (321 of the 642 craters) - the other half
+  # ("train_pool") is what src/train/prototypical_loss.py draws its
+  # support/query episodes from during a proto-loss DINO finetune, so scoring
+  # THAT checkpoint against the full new_set would silently include craters
+  # it was directly supervised on. This is the leak-safe common ground for
+  # comparing a proto-loss finetune against a plain finetune/stock checkpoint
+  # (neither of which ever saw new_test_set at all, so restricting them to
+  # the same 321 craters costs nothing, just keeps the comparison apples-to-
+  # apples). See src/eval/new_test_set_split.py.
+  new_set_final_test:
+    dat_path: "data/processed_wac_100m_new/sigma/100/new_test_set/craters.dat"
+    metadata_csv: "data/processed_wac_100m_new/sigma/100/new_test_set/metadata.csv"
+    imgs_dir: "data/processed_wac_100m_new/sigma/100/new_test_set/crater_crops"
+    labels_csv: "configs/correct_crater_with_labels_final.csv"
+    class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+    id_split_csv: "configs/new_test_set_split.csv"
+    id_split_value: "final_test"
 
-# Held-out UNLABELED set (configs/holdout_crater_ids.csv), materialized by
-# `snakemake preprocess_holdout_set`. Used for reconstruction loss (mae/cae
-# only) and unsupervised clustering quality (all architectures).
-holdout:
-  dat_path: "data/processed_wac_100m_new/sigma/100/holdout/craters.dat"
+# No "holdout:" section - the random-unlabeled holdout set
+# (configs/holdout_crater_ids.csv) is no longer part of the eval suite;
+# labeled_sets.new_set is the only held-out-from-training set now. evaluate.py
+# skips the holdout step entirely when this key is absent (see main()'s
+# `"holdout" in cfg` check) - no --skip-holdout flag needed.

@@ -42,8 +42,10 @@ import cv2
 from PIL import Image
 from src.helper_functions import *      # crop_crater, etc. (same as preprocess.py)
 
-# Reuse the exact filtering / CRS / seam-exclusion logic from preprocess.py
-from preprocess import load_and_filter_craters, get_craters_crs
+# Reuse the exact filtering / CRS / seam-exclusion logic from preprocess_2.py
+# (preprocess.py is an older, unmaintained duplicate - superseded everywhere
+# else in the pipeline, including the exclude/only_crater_ids registry support).
+from preprocess_2 import load_and_filter_craters, get_craters_crs
 
 
 # ── config ──────────────────────────────────────────────────────────────────
@@ -164,6 +166,14 @@ if __name__ == "__main__":
     p.add_argument("--latitude_bounds",   type=float, nargs=2, default=[-60, 60])
     p.add_argument("--exclude_lon_bounds", type=float, nargs=2, default=[180, 270],
                    help="Seam band to drop (deg E). Default 180-270 (the bad tile).")
+    p.add_argument("--exclude_crater_ids", nargs="+", default=None,
+                   help="One or more held-out crater ID registries (each: CSV with a "
+                        "CRATER_ID column, or one ID per line) - unioned across all of "
+                        "them. Drops these before --craters_to_output subsampling.")
+    p.add_argument("--only_crater_ids", nargs="+", default=None,
+                   help="One or more crater ID registries (same format, unioned). "
+                        "Restricts the export to ONLY these craters, e.g. to "
+                        "materialize a specific labeled/held-out set's PNGs.")
     p.add_argument("--craters_to_output", type=int, default=-1)
     p.add_argument("--scaling", choices=["global", "raw01"], default="global",
                    help="'global' = robust dataset-wide percentile range (default); "
@@ -178,6 +188,8 @@ if __name__ == "__main__":
         args.craters_csv, args.min_diameter, args.max_diameter,
         args.latitude_bounds, args.craters_to_output,
         exclude_lon_bounds=args.exclude_lon_bounds,
+        exclude_crater_ids=args.exclude_crater_ids,
+        only_crater_ids=args.only_crater_ids,
     )
     print(f"Filtered {len(filtered)} craters")
 

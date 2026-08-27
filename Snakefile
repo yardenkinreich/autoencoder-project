@@ -1,6 +1,10 @@
 import os
+import sys
 import datetime
 import shutil
+
+sys.path.insert(0, "src")
+from run_layout import canonical_run_dir
 
 
 # --- Parameters of the Run ---
@@ -24,26 +28,53 @@ NUM_GPUS          = 1           # >1 trains train_autoencoder via torchrun (sing
 INPUT_DIR = "data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band"
 DATA_TAG  = "wac100m_sigma100_noband"
 
-# Held-out test set (configs/holdout_crater_ids.csv), preprocessed at the same
-# FOV/offset as INPUT_DIR (0.5, MAE/CAE's tight crop) so it's directly
-# comparable to what those two architectures trained on. DINO's wider FOV
-# (see DINO_CLEAN_OFFSET below) would need its own separate holdout export -
-# not built yet, since nothing evaluates DINO reconstruction (it doesn't
-# reconstruct images the way MAE/CAE do).
+# Random-unlabeled holdout set (configs/holdout_crater_ids.csv) - materialized
+# by `snakemake preprocess_holdout_set` but NOT wired into
+# preprocess_craters/preprocess_craters_dino's --exclude_crater_ids or
+# eval_suite.yaml anymore - the reviewed new-test-set craters (see
+# NEW_TEST_SET_IDS below) are the only held-out set training now excludes.
+# Rule/files kept (not deleted) in case this is wanted again later.
 HOLDOUT_DIR = "data/processed_wac_100m_new/sigma/100/holdout"
 
+# Second held-out test set: configs/correct_crater_with_labels_final.csv
+# (notebooks/review_new_test_set.ipynb's output) - a REVIEWED/LABELED set
+# (v-fr/r-fr/r-dr/v-dr degree classes), unlike holdout_crater_ids.csv's
+# unlabeled random sample. Excluded from training the same way (see
+# preprocess_craters/preprocess_craters_dino below); materialized separately
+# by `snakemake preprocess_new_test_set` since it needs its own diameter
+# bounds (~1-4.2km - this set skews smaller than MIN_DIAMETER/MAX_DIAMETER's
+# 3-10km training range) rather than reusing the training config's.
+NEW_TEST_SET_IDS = "configs/correct_crater_with_labels_final.csv"
+NEW_TEST_SET_DIR = "data/processed_wac_100m_new/sigma/100/new_test_set"
+# NEW_TEST_SET_DIR_WIDE (DINO-FOV variant) is defined alongside the
+# preprocess_new_test_set rule below, next to NEW_TEST_SET_OFFSETS.
+
 # --- Run naming ---
-# key=value tokens (not bare numbers) so a folder name alone tells you the run's
-# config; runs that share model + data + these params share a folder, so reruns
-# with identical settings resume/overwrite instead of fragmenting into new ones.
-if AUTOENCODER_MODEL == "cae":
-    RUN_NAME = f"d{MIN_DIAMETER:g}-{MAX_DIAMETER:g}_ep{EPOCHS}_lat{LATENT_DIM}_n{NUM_SAMPLES}"
-elif AUTOENCODER_MODEL == "mae":
-    RUN_NAME = f"d{MIN_DIAMETER:g}-{MAX_DIAMETER:g}_ep{EPOCHS}_mask{MASK_RATIO:g}_n{NUM_SAMPLES}"
-else:
+# RUN_DIR is the same canonical logs/{family}/{source}/{structure}/{frozen}/
+# {data_source}/{crater_range}/{num_samples}/{other_metric}/{epochs}/ path
+# every other tool in this project computes from a run_manifest.json
+# (see src/run_layout.py) - built here from a manifest-shaped dict of these
+# same Snakefile variables, so a fresh training run lands exactly where its
+# own manifest (written by train.py at the end of the run) says it belongs,
+# not at some other ad hoc path. Runs that share every one of these fields
+# share a folder, so reruns with identical settings resume/overwrite instead
+# of fragmenting into new ones - matches the old RUN_NAME convention's intent.
+if AUTOENCODER_MODEL not in ("cae", "mae"):
     raise ValueError("Unsupported AUTOENCODER_MODEL. Choose 'cae' or 'mae'.")
 
-RUN_DIR = f"logs/{AUTOENCODER_MODEL}/{DATA_TAG}/{RUN_NAME}"
+_source = "finetune" if (AUTOENCODER_MODEL == "mae" and PRETRAINED_WEIGHTS) else "scratch"
+RUN_DIR = canonical_run_dir({
+    "family": AUTOENCODER_MODEL,
+    "source": _source,
+    "pretrained_weights": PRETRAINED_WEIGHTS if _source == "finetune" else None,
+    "epochs": EPOCHS,
+    "mask_ratio": MASK_RATIO if AUTOENCODER_MODEL == "mae" else None,
+    "latent_dim": LATENT_DIM if AUTOENCODER_MODEL == "cae" else None,
+    "num_samples": NUM_SAMPLES,
+    "diameter_range": [MIN_DIAMETER, MAX_DIAMETER],
+    "data_tag": DATA_TAG,
+    "freeze_until": None,
+})
 
 MODELS_DIR  = f"{RUN_DIR}/models"
 RESULTS_DIR = f"{RUN_DIR}/results"
@@ -78,8 +109,42 @@ DINO_EPOCHS       = 100
 DINO_CLEAN_OFFSET = 1.0   # ~2x diameter FOV (vs MAE's 0.5) — see preprocess_2.py --clean_offset
 
 DINO_INPUT_DIR = f"{os.path.dirname(os.path.dirname(INPUT_DIR))}/dino_wide"
-DINO_RUN_NAME  = f"d{MIN_DIAMETER:g}-{MAX_DIAMETER:g}_ep{DINO_EPOCHS}"
-DINO_RUN_DIR   = f"logs/dino/{DATA_TAG}_wide/{DINO_RUN_NAME}"
+# Same canonical-path computation as RUN_DIR above.
+DINO_RUN_DIR = canonical_run_dir({
+    "family": "dino",
+    "source": "scratch",
+    "pretrained_weights": None,
+    "epochs": DINO_EPOCHS,
+    "mask_ratio": None,
+    "latent_dim": None,
+    "num_samples": None,
+    "diameter_range": [MIN_DIAMETER, MAX_DIAMETER],
+    "data_tag": f"{DATA_TAG}_wide",
+    "freeze_until": None,
+})
+
+# --- DINOv2 finetune (opt-in: `snakemake train_dino_finetune`) ---
+# Warm-starts from the stock ImageNet-pretrained checkpoint instead of
+# training from scratch - see configs/dino_craters_finetune.yaml for why
+# every prior DINO run (including ones nominally called a "finetune") was
+# actually from-scratch, and why this needed its own config rather than
+# an --opts override of dino_craters.yaml (patch_size/in_chans must match
+# the checkpoint exactly, not just add a pretrained_weights path on top of
+# the from-scratch architecture).
+DINO_FINETUNE_EPOCHS = 10
+DINO_FINETUNE_PRETRAINED = "data/raw/pretrained/dinov2_vits14_pretrain.pth"
+DINO_FINETUNE_RUN_DIR = canonical_run_dir({
+    "family": "dino",
+    "source": "finetune",
+    "pretrained_weights": DINO_FINETUNE_PRETRAINED,
+    "epochs": DINO_FINETUNE_EPOCHS,
+    "mask_ratio": None,
+    "latent_dim": None,
+    "num_samples": None,
+    "diameter_range": [MIN_DIAMETER, MAX_DIAMETER],
+    "data_tag": f"{DATA_TAG}_wide",
+    "freeze_until": None,
+})
 
 # --- Rule all ---
 rule all:
@@ -102,7 +167,7 @@ rule preprocess_craters:
         map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
         craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
         scaling_json = "configs/global_scaling.json",
-        holdout_ids  = "configs/holdout_crater_ids.csv"
+        new_test_set_ids = NEW_TEST_SET_IDS
     output:
         output_dir_clean = directory(f"{INPUT_DIR}/crater_crops_clean"),
         output_dir_aug   = directory(f"{INPUT_DIR}/crater_crops_aug"),
@@ -134,7 +199,7 @@ rule preprocess_craters:
             --save_np_array \
             --autoencoder_model {params.autoencoder_model} \
             --exclude_lon_bounds 180 270 \
-            --exclude_crater_ids {input.holdout_ids} \
+            --exclude_crater_ids {input.new_test_set_ids} \
             --norm_mode global \
             --scaling_json {input.scaling_json}
 
@@ -182,6 +247,84 @@ rule preprocess_holdout_set:
         """
 
 
+# Suffix -> clean_offset (crop radius as a multiple of crater diameter):
+# "" is preprocess_new_test_set's original MAE/CAE-matching 0.5x default;
+# "_wide" is DINO's ~1.0x framing (DINO_CLEAN_OFFSET) - needed so the
+# planned prototypical-loss auxiliary training (labeled supervision mixed
+# into DINO's own training loop) sees craters framed the same way DINO's
+# own unlabeled training data (dino_wide) is, not a narrower crop that
+# would inject an extra, unintended distribution shift into the one signal
+# meant to help. One parameterized rule (preprocess_2.py already exposes
+# --clean_offset) rather than two near-duplicate rule blocks.
+NEW_TEST_SET_OFFSETS = {"": 0.5, "_wide": DINO_CLEAN_OFFSET}
+NEW_TEST_SET_DIR_WIDE = f"{NEW_TEST_SET_DIR}_wide"
+
+
+rule preprocess_new_test_set:
+    # Materializes NEW_TEST_SET_IDS (configs/correct_crater_with_labels_final.csv,
+    # notebooks/review_new_test_set.ipynb's output) - same shape as
+    # preprocess_holdout_set, but a SEPARATE labeled set (v-fr/r-fr/r-dr/
+    # v-dr degree classes) rather than the random unlabeled holdout.
+    # Diameter bounds are widened to this set's own range (~1-4.2km) rather
+    # than reusing MIN_DIAMETER/MAX_DIAMETER - training keeps its own
+    # 3-10km range untouched; this deliberately tests generalization to
+    # smaller craters than the model trained on. No --exclude_lon_bounds
+    # here (unlike the training rules) - that drops the mosaic-seam band
+    # for training-data QUALITY reasons, but this is a fixed, manually-
+    # reviewed test set; silently dropping craters to a training heuristic
+    # isn't appropriate for a test set.
+    #
+    # {fov} wildcard picks the crop offset - see NEW_TEST_SET_OFFSETS above.
+    #
+    # latitude_bounds stays -60/60, UNLIKE the longitude band above - this
+    # isn't a policy filter, it's the mosaic's actual data coverage limit:
+    # highpass_filtered_lunar_mosaic.tif's raster bounds are exactly
+    # +/-1819401.0254489686m, which is +/-60.0000 deg for this equirect.
+    # projection's 1737400m lunar radius (y = R * lat_rad). Craters beyond
+    # that have no source pixels at all - not a subset we're choosing to
+    # skip, a subset that physically isn't in this raster. ~128 of the 770
+    # reviewed craters fall outside it and can't be materialized from this
+    # mosaic; -90/90 was tried and crashes (cv2 tries to resize a
+    # zero-size window read from outside the raster).
+    input:
+        map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
+        craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
+        scaling_json = "configs/global_scaling.json",
+        test_ids     = NEW_TEST_SET_IDS
+    output:
+        output_dir_clean = directory("data/processed_wac_100m_new/sigma/100/new_test_set{fov}/crater_crops"),
+        np_output_clean  = "data/processed_wac_100m_new/sigma/100/new_test_set{fov}/craters.dat",
+        metadata_output  = "data/processed_wac_100m_new/sigma/100/new_test_set{fov}/metadata.csv"
+    wildcard_constraints:
+        fov = "|_wide"
+    params:
+        min_diameter = 1.0,
+        max_diameter = 5.0,
+        lat_min      = -60,
+        lat_max      = 60,
+        clean_offset = lambda wildcards: NEW_TEST_SET_OFFSETS[wildcards.fov]
+    shell:
+        """
+        PYTHONPATH=$(pwd) python src/data/preprocess_2.py \
+            --map_file {input.map_file} \
+            --craters_csv {input.craters_csv} \
+            --output_dir_clean {output.output_dir_clean} \
+            --np_output_path_clean {output.np_output_clean} \
+            --info_output_path {output.metadata_output} \
+            --min_diameter {params.min_diameter} \
+            --max_diameter {params.max_diameter} \
+            --latitude_bounds {params.lat_min} {params.lat_max} \
+            --craters_to_output -1 \
+            --only_crater_ids {input.test_ids} \
+            --clean_offset {params.clean_offset} \
+            --save_raw_crops \
+            --save_np_array \
+            --autoencoder_model mae \
+            --norm_mode global \
+            --scaling_json {input.scaling_json}
+        """
+
+
 # --- Main training ---
 rule train_autoencoder:
     input:
@@ -201,7 +344,11 @@ rule train_autoencoder:
         mask_ratio        = MASK_RATIO,
         latent_dim        = LATENT_DIM,
         pretrained        = PRETRAINED_WEIGHTS if AUTOENCODER_MODEL == "mae" else "",
-        num_samples       = NUM_SAMPLES
+        num_samples       = NUM_SAMPLES,
+        run_dir           = RUN_DIR,
+        min_diameter      = MIN_DIAMETER,
+        max_diameter      = MAX_DIAMETER,
+        data_tag          = DATA_TAG
     shell:
         """
         PYTHONPATH=$(pwd) {params.launcher} src/train/train.py \
@@ -218,6 +365,10 @@ rule train_autoencoder:
             --val_split {params.val_split} \
             --mask_ratio {params.mask_ratio} \
             --latent_dim {params.latent_dim} \
+            --run_dir {params.run_dir} \
+            --min_diameter {params.min_diameter} \
+            --max_diameter {params.max_diameter} \
+            --data_tag {params.data_tag} \
             $([ -n "{params.pretrained}" ] && echo "--pretrained_weights {params.pretrained}")
         """
 
@@ -229,7 +380,7 @@ rule preprocess_craters_dino:
         map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
         craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
         scaling_json = "configs/global_scaling.json",
-        holdout_ids  = "configs/holdout_crater_ids.csv"
+        new_test_set_ids = NEW_TEST_SET_IDS
     output:
         output_dir_clean = directory(f"{DINO_INPUT_DIR}/crater_crops"),
         np_output_clean  = f"{DINO_INPUT_DIR}/craters_wide.dat",
@@ -258,7 +409,7 @@ rule preprocess_craters_dino:
             --save_np_array \
             --autoencoder_model mae \
             --exclude_lon_bounds 180 270 \
-            --exclude_crater_ids {input.holdout_ids} \
+            --exclude_crater_ids {input.new_test_set_ids} \
             --norm_mode global \
             --scaling_json {input.scaling_json}
         """
@@ -275,16 +426,56 @@ rule train_dino:
     output:
         model = f"{DINO_RUN_DIR}/eval/final/teacher_checkpoint.pth"
     params:
-        output_dir = DINO_RUN_DIR,
-        epochs     = DINO_EPOCHS,
-        num_gpus   = DINO_GPUS
+        output_dir   = DINO_RUN_DIR,
+        epochs       = DINO_EPOCHS,
+        num_gpus     = DINO_GPUS,
+        min_diameter = MIN_DIAMETER,
+        max_diameter = MAX_DIAMETER,
+        data_tag     = f"{DATA_TAG}_wide"   # matches DINO_RUN_DIR - DINO trains on a
+                                             # genuinely different (wider-FOV) data export
+                                             # than MAE/CAE, not just a differently-named copy
     shell:
         """
         PYTHONPATH=$(pwd) torchrun --standalone --nproc_per_node={params.num_gpus} \
             src/train/train_dino.py \
             --input {input.data} \
             --output_dir {params.output_dir} \
-            --epochs {params.epochs}
+            --epochs {params.epochs} \
+            --min_diameter {params.min_diameter} \
+            --max_diameter {params.max_diameter} \
+            --data_tag {params.data_tag}
+        """
+
+
+rule train_dino_finetune:
+    # Warm-starts from the stock ImageNet-pretrained checkpoint - see
+    # configs/dino_craters_finetune.yaml for why this needs its own config
+    # rather than an --opts override on top of dino_craters.yaml.
+    input:
+        data = f"{DINO_INPUT_DIR}/craters_wide.dat"
+    output:
+        model = f"{DINO_FINETUNE_RUN_DIR}/eval/final/teacher_checkpoint.pth"
+    params:
+        output_dir   = DINO_FINETUNE_RUN_DIR,
+        config_file  = "configs/dino_craters_finetune.yaml",
+        epochs       = DINO_FINETUNE_EPOCHS,
+        num_gpus     = DINO_GPUS,
+        pretrained   = DINO_FINETUNE_PRETRAINED,
+        min_diameter = MIN_DIAMETER,
+        max_diameter = MAX_DIAMETER,
+        data_tag     = f"{DATA_TAG}_wide"
+    shell:
+        """
+        PYTHONPATH=$(pwd) torchrun --standalone --nproc_per_node={params.num_gpus} \
+            src/train/train_dino.py \
+            --input {input.data} \
+            --output_dir {params.output_dir} \
+            --config_file {params.config_file} \
+            --epochs {params.epochs} \
+            --pretrained_weights {params.pretrained} \
+            --min_diameter {params.min_diameter} \
+            --max_diameter {params.max_diameter} \
+            --data_tag {params.data_tag}
         """
 
 

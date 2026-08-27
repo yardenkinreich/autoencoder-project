@@ -26,7 +26,13 @@ sys.path.append(os.path.abspath("."))
 sys.path.append(os.path.abspath("src/models/mae"))   # for util.pos_embed
 from src.models.autoencoder import ConvAutoencoder
 from src.models.mae_bottleneck import load_mae, encode_for_clustering
-from src.models.dino_backbone import load_dino_backbone
+from src.models.dino_backbone import (
+    load_dino_backbone, load_stock_pretrained_dino, encode_stock_pretrained_dino,
+    STOCK_DINO_CHECKPOINT,
+)
+from src.models.mae_pretrained import (
+    load_stock_pretrained_mae, encode_stock_pretrained_mae, STOCK_MAE_CHECKPOINT,
+)
 
 # ── architecture — must mirror train.py exactly ───────────────────────────────
 INPUT_SIZE = 128      # ← was 224; matches OUTPUT_SIZE in preprocess.py
@@ -56,8 +62,19 @@ STATE_COLORS = {1: "tab:blue", 2: "tab:green",
 def build_model(autoencoder_model: str, bottleneck: int,
                 model_path: str, device: torch.device):
     if autoencoder_model == "cae":
-        model = ConvAutoencoder(latent_dim=bottleneck)
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        # Auto-detect latent_dim from the checkpoint's own encoder bottleneck
+        # layer rather than trusting a caller-supplied `bottleneck` - that
+        # value has silently drifted between callers (this module's own CLI
+        # defaults to 6; eval/pipeline.py's default is 64) and previously
+        # caused a hard state_dict shape-mismatch crash on any checkpoint
+        # trained with a different latent_dim (e.g. a lat40 run evaluated
+        # with the eval harness's default 64). Same auto-detect philosophy
+        # load_mae() below already uses for MAE checkpoints.
+        state_dict = torch.load(model_path, map_location=device)
+        detected = state_dict.get("encoder.9.weight")
+        latent_dim = int(detected.shape[0]) if detected is not None else bottleneck
+        model = ConvAutoencoder(latent_dim=latent_dim)
+        model.load_state_dict(state_dict)
         model.to(device).eval()
         return model
 
@@ -66,11 +83,49 @@ def build_model(autoencoder_model: str, bottleneck: int,
         # architecture (384 for vit_small), not user-settable via this flag.
         return load_dino_backbone(model_path, device=device)
 
+    if autoencoder_model == "dino_pretrained":
+        # frozen, stock (unmodified architecture) Meta ImageNet/LVD-142M
+        # checkpoint - no crater-specific training at all. See
+        # src/models/dino_backbone.py's STOCK_DINO_* for why. model_path is
+        # optional here (falls back to the default download location) since
+        # there's no user-trained checkpoint to point at.
+        return load_stock_pretrained_dino(
+            model_path or STOCK_DINO_CHECKPOINT, device=device)
+
+    if autoencoder_model == "mae_pretrained":
+        # frozen, stock official Meta ImageNet MAE checkpoint - the same
+        # "use it as-is, no crater training" comparison as dino_pretrained.
+        # See src/models/mae_pretrained.py.
+        return load_stock_pretrained_mae(
+            model_path or STOCK_MAE_CHECKPOINT, device=device)
+
     # mae — load_mae auto-detects whether this checkpoint has the clustering
-    # bottleneck (old runs) or not (current default) and builds accordingly.
+    # bottleneck (old runs) or not (current default) and builds accordingly,
+    # and also auto-detects patch_size/img_size from the checkpoint itself
+    # (overriding MAE_KWARGS's img_size=128/patch_size=8 when a checkpoint
+    # predates that convention - see model_input_size() below, which callers
+    # use to resize their input images to match).
     model = load_mae(checkpoint_path=model_path, device=device, **MAE_KWARGS)
     model.eval()
     return model
+
+
+def model_input_size(model, default: int = INPUT_SIZE) -> int:
+    """The square image size `model` actually expects, read off the model
+    itself rather than assumed. MAE checkpoints can have their own native
+    resolution auto-detected at load time (see mae_bottleneck.load_mae) that
+    differs from this project's current INPUT_SIZE=128 convention - callers
+    (eval/pipeline.py's embed(), eval/holdout.py's embed_holdout()) resize
+    to whatever this returns, not a hardcoded constant, so an
+    older-resolution checkpoint can still be evaluated correctly. Falls back
+    to `default` for architectures that don't expose this the same way
+    (CAE has no patch embedding at all; DINO's own backbone is handled
+    separately and always uses its own fixed resolution)."""
+    patch_embed = getattr(model, "patch_embed", None)
+    img_size = getattr(patch_embed, "img_size", None)
+    if img_size is not None:
+        return int(img_size[0])
+    return default
 
 
 # ── encoding helpers ──────────────────────────────────────────────────────────
@@ -81,8 +136,30 @@ def _encode_mae_batch(model, imgs: torch.Tensor) -> torch.Tensor:
 
 
 def _encode_dino_batch(model, imgs: torch.Tensor) -> torch.Tensor:
+    # imgs arrives single-channel (grayscale craters) regardless of
+    # architecture - the old from-scratch "dino" convention (patch8/
+    # in_chans1) wants that as-is, but configs/dino_craters_finetune.yaml's
+    # checkpoint-matching architecture (patch14/in_chans3, see
+    # dino_backbone.py's _detect_dino_arch) expects 3 channels, same
+    # grayscale-replicated-3x convention CraterAugmentationDINO already uses
+    # at training time (src/data/dino_craters_augmentation.py) and
+    # encode_stock_pretrained_dino already does for the stock checkpoint.
+    # Read the model's OWN expected channel count rather than assuming -
+    # same auto-detect philosophy as load_dino_backbone()'s architecture
+    # detection, so this stays correct for either "dino" architecture.
+    in_chans = model.patch_embed.proj.in_channels
+    if imgs.shape[1] != in_chans:
+        imgs = imgs.repeat(1, in_chans, 1, 1)
     with torch.no_grad():
         return model(imgs)   # normalized CLS token (see src/models/dino_backbone.py)
+
+
+def _encode_dino_pretrained_batch(model, imgs: torch.Tensor) -> torch.Tensor:
+    return encode_stock_pretrained_dino(model, imgs)
+
+
+def _encode_mae_pretrained_batch(model, imgs: torch.Tensor) -> torch.Tensor:
+    return encode_stock_pretrained_mae(model, imgs)
 
 
 def _encode_cae_batch(model: ConvAutoencoder,
@@ -95,9 +172,11 @@ def _encode_cae_batch(model: ConvAutoencoder,
 # place that knows how to turn (autoencoder_model, model, imgs) into an
 # embedding, instead of a third copy of this dispatch logic.
 ENCODE_FNS = {
-    "mae":  _encode_mae_batch,
-    "dino": _encode_dino_batch,
-    "cae":  _encode_cae_batch,
+    "mae":             _encode_mae_batch,
+    "dino":            _encode_dino_batch,
+    "dino_pretrained": _encode_dino_pretrained_batch,
+    "mae_pretrained":  _encode_mae_pretrained_batch,
+    "cae":             _encode_cae_batch,
 }
 
 

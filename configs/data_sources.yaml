@@ -1,0 +1,58 @@
+# data_sources.yaml — catalog of physical crop sets behind the data
+# dashboard (src/dashboard/pages/3_Data_Sources.py). Scoped to data_tags
+# actually used by trained models (see dashboard/model_meta.py's data_tag
+# resolution) - not every raw mosaic variant that ever existed under
+# data/raw, most of which no current model trains on.
+#
+# Each entry is one concrete, already-materialized crop set - NOT one row
+# per data_tag, since a single data_tag (same source mosaic/filter) can back
+# several genuinely different crop conventions (diameter range, FOV/crop
+# radius, purpose). Comparing across entries is exactly the point: two
+# entries can share a data_tag and still differ in everything else.
+#
+# Every entry needs: metadata_csv (id,lat,lon,x,y,diam columns) + crops_dir
+# (per-crater {id}.npy files, same convention image_intensity_features()
+# already reads) - OR imgs_dir alone for a PNG-only source with no
+# lat/lon/diam metadata (Julie's set), which only ever gets pixel/brightness/
+# sobel profiling, never a geo/diameter correlation check.
+sources:
+  - name: wac100m_raw__cae_training
+    data_tag: wac100m_raw
+    fov: 0.5
+    note: "CAE's original training crops - raw (unfiltered) 100m/px mosaic."
+    metadata_csv: "data/processed/cae/metadata.csv"
+    crops_dir: "data/processed/cae/crater_crops"
+
+  - name: wac100m_raw__mae_training
+    data_tag: wac100m_raw
+    fov: 0.5
+    note: "MAE's original training crops - same raw mosaic, MAE's own crop pass."
+    metadata_csv: "data/processed/mae/metadata.csv"
+    crops_dir: "data/processed/mae/crater_crops"
+
+  - name: wac100m_sigma100__training
+    data_tag: wac100m_sigma100
+    fov: 0.5
+    note: "Main MAE/CAE training set - sigma-100 highpass-filtered mosaic, augmented."
+    metadata_csv: "data/processed_wac_100m_new/sigma/100/metadata.csv"
+    crops_dir: "data/processed_wac_100m_new/sigma/100/crater_crops_aug"
+
+  - name: wac100m_sigma100__new_test_set
+    data_tag: wac100m_sigma100
+    fov: 0.5
+    note: "The new labeled test set (v-fr/r-fr/r-dr/v-dr) - same source/FOV as training, much smaller diameters."
+    metadata_csv: "data/processed_wac_100m_new/sigma/100/new_test_set/metadata.csv"
+    crops_dir: "data/processed_wac_100m_new/sigma/100/new_test_set/crater_crops"
+
+  - name: wac100m_sigma100__dino_wide
+    data_tag: wac100m_sigma100
+    fov: 1.0
+    note: "DINO's own training crops - same source/filter, but the wider ~1.0x FOV. crater_crops/ was never materialized (--save_raw_crops wasn't used) - read from the combined memmap by row index instead (metadata.csv row order matches craters_wide.dat row order, same convention holdout.py relies on)."
+    metadata_csv: "data/processed_wac_100m_new/sigma/100/dino_wide/metadata.csv"
+    dat_path: "data/processed_wac_100m_new/sigma/100/dino_wide/craters_wide.dat"
+
+  - name: julie
+    data_tag: unknown
+    fov: 0.5
+    note: "Julie's hand-provided labeled PNGs - no recorded source mosaic, no lat/lon/diam metadata (pixel/brightness/sobel profiling only)."
+    imgs_dir: "data/raw/craters_for_danny"

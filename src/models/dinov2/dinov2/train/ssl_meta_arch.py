@@ -5,7 +5,9 @@
 
 from functools import partial
 import logging
+import math
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -28,6 +30,42 @@ except ImportError:
 logger = logging.getLogger("dinov2")
 
 
+def _resize_pretrained_pos_embed(state_dict: dict, target_pos_embed: torch.Tensor) -> None:
+    """Bicubic-interpolate a checkpoint's pos_embed (patch tokens only -
+    the CLS token position is kept as-is) to match the target model's own
+    pos_embed shape, in place on state_dict.
+
+    load_state_dict(strict=False) only tolerates missing/unexpected KEYS,
+    not a shape mismatch on a key present in both - loading a checkpoint
+    trained at a different resolution (e.g. finetuning this project's
+    224px crops from the stock checkpoint's native 518px) needs this done
+    explicitly before the load. The model's own interpolate_pos_encoding()
+    (vision_transformer.py) doesn't help here - that only ever interpolates
+    FROM the model's own already-loaded pos_embed at forward-pass time to
+    match a given input's resolution; it's never invoked during checkpoint
+    loading itself."""
+    ckpt_pos_embed = state_dict.get("pos_embed")
+    if ckpt_pos_embed is None or ckpt_pos_embed.shape == target_pos_embed.shape:
+        return
+    n_ckpt = ckpt_pos_embed.shape[1] - 1
+    n_target = target_pos_embed.shape[1] - 1
+    m_ckpt = int(math.sqrt(n_ckpt))
+    m_target = int(math.sqrt(n_target))
+    assert m_ckpt * m_ckpt == n_ckpt and m_target * m_target == n_target, (
+        f"pos_embed patch grid isn't square: checkpoint has {n_ckpt} patch tokens, "
+        f"target model has {n_target}")
+    dim = ckpt_pos_embed.shape[-1]
+    cls_pos_embed = ckpt_pos_embed[:, :1]
+    patch_pos_embed = ckpt_pos_embed[:, 1:].reshape(1, m_ckpt, m_ckpt, dim).permute(0, 3, 1, 2)
+    patch_pos_embed = nn.functional.interpolate(
+        patch_pos_embed.float(), size=(m_target, m_target), mode="bicubic", antialias=True
+    ).to(ckpt_pos_embed.dtype)
+    patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).reshape(1, m_target * m_target, dim)
+    state_dict["pos_embed"] = torch.cat([cls_pos_embed, patch_pos_embed], dim=1)
+    logger.info(f"OPTIONS -- pretrained weights: interpolated pos_embed "
+               f"{m_ckpt}x{m_ckpt} -> {m_target}x{m_target} patches")
+
+
 class SSLMetaArch(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -45,7 +83,16 @@ class SSLMetaArch(nn.Module):
         if cfg.student.pretrained_weights:
             chkpt = torch.load(cfg.student.pretrained_weights)
             logger.info(f"OPTIONS -- pretrained weights: loading from {cfg.student.pretrained_weights}")
-            student_backbone.load_state_dict(chkpt["model"], strict=False)
+            # DINOv2's own training checkpoints (FSDPCheckpointer) wrap the
+            # state dict under "model"; the publicly released stock
+            # inference checkpoints (e.g. dinov2_vits14_pretrain.pth) are
+            # the flat state dict itself - support both rather than
+            # assuming the training-checkpoint format.
+            state_dict = chkpt["model"] if "model" in chkpt else chkpt
+            _resize_pretrained_pos_embed(state_dict, student_backbone.pos_embed)
+            missing, unexpected = student_backbone.load_state_dict(state_dict, strict=False)
+            logger.info(f"OPTIONS -- pretrained weights: {len(missing)} missing, "
+                       f"{len(unexpected)} unexpected keys (strict=False)")
 
         self.embed_dim = embed_dim
         self.dino_out_dim = cfg.dino.head_n_prototypes
@@ -54,6 +101,29 @@ class SSLMetaArch(nn.Module):
         self.do_koleo = cfg.dino.koleo_loss_weight > 0
         self.do_ibot = cfg.ibot.loss_weight > 0
         self.ibot_separate_head = cfg.ibot.separate_head
+
+        # Prototypical-loss auxiliary supervision (see src/train/
+        # prototypical_loss.py's module docstring) - entirely optional,
+        # absent from ssl_default_config.yaml's schema, so cfg.get(...)
+        # rather than cfg.proto.* keeps every from-scratch/plain-finetune
+        # config (no "proto:" section at all) working unmodified.
+        proto_cfg = cfg.get("proto", None)
+        self.do_proto = bool(proto_cfg) and proto_cfg.get("enabled", False)
+        if self.do_proto:
+            from src.train.prototypical_loss import LabeledEpisodePool
+
+            logger.info("OPTIONS -- PROTO -- enabled")
+            logger.info(f"OPTIONS -- PROTO -- loss_weight: {proto_cfg.loss_weight}")
+            logger.info(f"OPTIONS -- PROTO -- n_support_per_class: {proto_cfg.n_support_per_class}")
+            self.proto_loss_weight = proto_cfg.loss_weight
+            self.proto_n_support = proto_cfg.n_support_per_class
+            self.proto_pool = LabeledEpisodePool(
+                dat_path=proto_cfg.dat_path, metadata_csv=proto_cfg.metadata_csv,
+                split_csv=proto_cfg.split_csv, class_names=list(proto_cfg.class_names),
+                crop_size=proto_cfg.get("crop_size", 224), in_chans=cfg.student.in_chans,
+                device="cuda",
+            )
+            self._proto_rng = np.random.RandomState(proto_cfg.get("seed", 0))
 
         logger.info("OPTIONS -- DINO")
         if self.do_dino:
@@ -137,6 +207,13 @@ class SSLMetaArch(nn.Module):
         global_crops = images["collated_global_crops"].cuda(non_blocking=True)
         local_crops = images["collated_local_crops"].cuda(non_blocking=True)
 
+        # DIAGNOSTIC ONLY - std of the raw INPUT crops across the batch dim.
+        # Rules out a data-loading bug (e.g. every sample being a duplicate
+        # of the same crater) as the cause of near-zero teacher logit std -
+        # if this is healthy but the logit std is still ~0, the problem is in
+        # the backbone/head, not the data pipeline.
+        self._diag_input_std = global_crops.detach().std(dim=0).mean()
+
         masks = images["collated_masks"].cuda(non_blocking=True)
         mask_indices_list = images["mask_indices_list"].cuda(non_blocking=True)
         n_masked_patches_tensor = images["n_masked_patches"].cuda(non_blocking=True)
@@ -154,6 +231,8 @@ class SSLMetaArch(nn.Module):
         ibot_loss_scale = 1.0 / n_global_crops
 
         # teacher output
+        _diag_raw_teacher_logits = []  # DIAGNOSTIC ONLY - see use below
+
         @torch.no_grad()
         def get_teacher_output():
             x, n_global_crops_teacher = global_crops, n_global_crops
@@ -196,6 +275,8 @@ class SSLMetaArch(nn.Module):
                 teacher_cls_tokens_after_head = self.teacher.dino_head(teacher_cls_tokens)
                 masked_teacher_ibot_softmaxed_centered = None
 
+            _diag_raw_teacher_logits.append(teacher_cls_tokens_after_head.detach())  # DIAGNOSTIC ONLY
+
             if self.cfg.train.centering == "centering":
                 teacher_dino_softmaxed_centered_list = self.dino_loss.softmax_center_teacher(
                     teacher_cls_tokens_after_head, teacher_temp=teacher_temp
@@ -230,6 +311,27 @@ class SSLMetaArch(nn.Module):
         reshard_fsdp_model(self.teacher)
 
         loss_dict = {}
+
+        # DIAGNOSTIC ONLY (not backpropagated) - mean entropy of the teacher's
+        # centered/softmaxed output distribution over dino.head_n_prototypes.
+        # If this collapses toward 0, the teacher's predictions have become
+        # near-one-hot/degenerate (representation collapse) regardless of what
+        # total_loss shows; if it stays near log(head_n_prototypes), the
+        # teacher output is still close to uniform/uninformative.
+        with torch.no_grad():
+            _p = teacher_dino_softmaxed_centered_list.flatten(0, 1)
+            loss_dict["diag_teacher_entropy"] = (
+                -(_p * torch.log(_p.clamp_min(1e-12))).sum(dim=-1).mean()
+            )
+            # DIAGNOSTIC ONLY - std of the RAW (pre-centering, pre-softmax)
+            # teacher logits ACROSS the batch dimension, averaged over
+            # prototypes. Near-zero here means the backbone+head are
+            # producing near-identical logits for different input crops -
+            # i.e. the collapse is upstream of the loss/centering math
+            # entirely, in representation learning itself.
+            _raw = _diag_raw_teacher_logits[0]
+            loss_dict["diag_teacher_logit_std_across_batch"] = _raw.std(dim=0).mean()
+            loss_dict["diag_input_std_across_batch"] = self._diag_input_std
 
         loss_accumulator = 0  # for backprop
         student_global_backbone_output_dict, student_local_backbone_output_dict = self.student.backbone(
@@ -338,6 +440,23 @@ class SSLMetaArch(nn.Module):
 
             # accumulate loss
             loss_accumulator += self.ibot_loss_weight * ibot_patch_loss
+
+        if self.do_proto:
+            from src.train.prototypical_loss import prototypical_loss
+
+            sx, sy, qx, qy = self.proto_pool.sample(self.proto_n_support, self._proto_rng)
+            proto_loss = prototypical_loss(
+                self.student.backbone, sx, sy, qx, qy, self.proto_pool.n_classes)
+            # summed into the SAME loss_accumulator backprop_loss() below
+            # calls .backward() on once - not a second, separate backward
+            # pass, which FSDP's gradient hooks don't expect per step.
+            # Kept small (proto.loss_weight, default 0.2 - see
+            # configs/dino_craters_finetune.yaml's comment) - the proto
+            # loss's episode is a much smaller, higher-variance signal than
+            # the 50k-crater unlabeled pool the rest of the loss sees, so
+            # it's meant as a gentle nudge, not an equal-weight objective.
+            loss_accumulator += self.proto_loss_weight * proto_loss
+            loss_dict["proto_loss"] = proto_loss.detach()
 
         self.backprop_loss(loss_accumulator)
 

@@ -72,6 +72,79 @@ def labels_from_png_dir(imgs_dir: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ── labels from a memmap-based set (a second, distinct labeling scheme) ─────
+def labels_from_memmap_csv(metadata_csv: str, labels_csv: str, class_names: list[str],
+                           label_col: str = "degree", id_col: str = "CRATER_ID",
+                           id_allowlist: set[str] | None = None) -> pd.DataFrame:
+    """
+    Build the labels table for a memmap-based labeled set — a craters.dat +
+    metadata.csv pair produced by preprocess_2.py's --only_crater_ids path
+    (e.g. `snakemake preprocess_new_test_set`), joined against a review CSV's
+    labels (configs/correct_crater_with_labels_final.csv, from
+    notebooks/review_new_test_set.ipynb). A completely different labeling
+    convention AND embedding source from labels_from_png_dir/embed()'s
+    PNG-filename-state scheme — this set's images are only ever materialized
+    through the SAME preprocess_2.py path training uses, at the exact
+    FOV/scaling training saw (see this module's docstring FOV warning re:
+    reusing images cut for some other purpose, like manual review).
+
+    metadata.csv's row order is positionally aligned with craters.dat's rows
+    (both written from the same filtered DataFrame in preprocess_2.py) — so
+    this returns a row_idx column (position into craters.dat) instead of a
+    filename, for use with eval.holdout.embed_holdout(..., row_idx=...)
+    rather than this module's PNG-based embed(). "filename" is still
+    included, pointing at the matching {id}.npy under the set's
+    crater_crops/ dir (from --save_raw_crops), purely for visualize.py's
+    display plots — not used for embedding.
+
+    class_names gives the ordinal order (index 0 = freshest, per
+    contract.LabelScheme) — this labeled set's OWN class_names (see
+    eval_suite.yaml's labeled_sets.<name>.class_names), which may differ in
+    both length and names from another set's (e.g. julie's 3-class
+    Semi-New/Semi-Old/Old vs. this set's 4-class v-fr/r-fr/r-dr/v-dr). Rows
+    with no matching/recognized label are skipped with a warning — same
+    failure-visibility contract as labels_from_png_dir.
+
+    id_allowlist: optional crater_id subset to restrict to (e.g. only the
+    "final_test" half of configs/new_test_set_split.csv - see
+    eval_suite.yaml's new_set_final_test entry) - for evaluating a checkpoint
+    that used the OTHER half ("train_pool") as direct training supervision
+    (src/train/prototypical_loss.py), where scoring against the full set
+    would leak train_pool craters into the "held-out" number. None (default)
+    keeps every row, matching every set that predates this filter.
+    """
+    meta = pd.read_csv(metadata_csv, dtype={"id": str})
+    labels_df = pd.read_csv(labels_csv, dtype={id_col: str})
+    class_to_ordinal = {name: i for i, name in enumerate(class_names)}
+    label_by_id = dict(zip(labels_df[id_col], labels_df[label_col]))
+
+    rows, skipped = [], []
+    for row_idx, crater_id in enumerate(meta["id"]):
+        if id_allowlist is not None and crater_id not in id_allowlist:
+            continue
+        label = label_by_id.get(crater_id)
+        if label not in class_to_ordinal:
+            skipped.append((crater_id, label))
+            continue
+        rows.append({
+            "crater_id": crater_id,
+            "true_label": class_to_ordinal[label],
+            "row_idx": row_idx,
+            "filename": f"{crater_id}.npy",
+        })
+    if skipped:
+        import warnings
+        warnings.warn(
+            f"skipped {len(skipped)}/{len(meta)} row(s) from {metadata_csv} "
+            f"(no matching/recognized label in {labels_csv} against "
+            f"{class_names}).", stacklevel=2)
+    if not rows:
+        raise FileNotFoundError(
+            f"no usable rows: none of {metadata_csv}'s craters matched a "
+            f"labeled class in {labels_csv} against {class_names}")
+    return pd.DataFrame(rows)
+
+
 # ── global scaling for eval, matching training ───────────────────────────────
 def _resolve_scaling(cfg: dict):
     """
@@ -118,20 +191,24 @@ def embed(labels: pd.DataFrame, cfg: dict, synthetic: bool = False) -> np.ndarra
 
     import torch
     from PIL import Image
-    from src.cluster.cluster import build_model, ENCODE_FNS
+    from src.cluster.cluster import build_model, model_input_size, ENCODE_FNS
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     autoencoder_model = cfg.get("autoencoder_model", "mae")
     model = build_model(autoencoder_model, cfg.get("bottleneck", 64),
                         cfg["checkpoint"], device)
     encode = ENCODE_FNS[autoencoder_model]
+    # usually INPUT_SIZE (128) - can differ for an MAE checkpoint whose own
+    # native resolution predates this project's current convention (see
+    # cluster.model_input_size's docstring).
+    target_size = model_input_size(model)
 
     imgs_dir = cfg["imgs_dir"]
     lo, hi, png_max = _resolve_scaling(cfg)
     tensors = []
     for f in labels["filename"]:
         img = Image.open(os.path.join(imgs_dir, f)).convert("L").resize(
-            (INPUT_SIZE, INPUT_SIZE))
+            (target_size, target_size))
         arr = np.array(img, dtype=np.float32)
         arr = _png_to_global(arr, lo, hi, png_max)      # match training scaling
         tensors.append(torch.from_numpy(arr).unsqueeze(0))

@@ -1,0 +1,119 @@
+# DINOv2 FINETUNE from the stock ImageNet-pretrained checkpoint
+# (data/raw/pretrained/dinov2_vits14_pretrain.pth), unlike dino_craters.yaml
+# (a from-scratch training budget).
+#
+# Every DINO run before this one (dino_smoke_test, dino_wide/ep2,
+# dino_wide/ep150) was actually from-scratch despite being called a
+# "finetune" - the Snakefile's train_dino rule never passed pretrained
+# weights, AND dino_craters.yaml's architecture (patch_size=8, in_chans=1)
+# is fundamentally incompatible with the stock checkpoint's shapes
+# (patch_size=14, in_chans=3) - the weights could never have loaded even if
+# someone had tried. That's the root cause "training did not improve latent
+# separation" - it was an undertrained from-scratch vit_small competing
+# against a real ImageNet-scale pretrained model, not a finetuning failure.
+#
+# Architecture below matches the stock checkpoint EXACTLY (arch/patch_size/
+# in_chans - required for load_state_dict to succeed; strict=False in
+# ssl_meta_arch.py only tolerates missing/unexpected KEYS, not shape
+# mismatches on keys present in both). Everything else is standard ViT
+# finetuning practice: much lower LR, more aggressive layer-wise LR decay,
+# a short schedule, frequent eval checkpoints.
+
+student:
+  arch: vit_small
+  patch_size: 14           # MUST match the stock checkpoint - it's patch14, not our
+                             # usual patch8 (dino_craters.yaml's from-scratch setting)
+  in_chans: 3               # MUST match too - stock is RGB. CraterAugmentationDINO
+                             # already replicates our single grayscale channel 3x
+                             # when in_chans>1 (see dino_craters_augmentation.py) -
+                             # no re-preprocessing of the .dat file needed.
+  channel_adaptive: false
+  drop_path_rate: 0.1
+  pretrained_weights: "data/raw/pretrained/dinov2_vits14_pretrain.pth"
+
+teacher:
+  in_chans: 3
+  channel_adaptive: false
+
+dino:
+  # The stock checkpoint is backbone-only (no head/prototype weights at
+  # all - verified directly: its state dict has no "head"/"dino" keys), so
+  # the DINO head is freshly initialized regardless of finetuning vs
+  # from-scratch - nothing to reset here, there's nothing pretrained to
+  # reset FROM.
+  head_n_prototypes: 4096
+
+crops:
+  global_crops_scale: [0.6, 1.0]     # unchanged from dino_craters.yaml - about how
+  local_crops_scale: [0.25, 0.6]      # DINO samples views, not weight compatibility
+  global_crops_size: 224              # RandomResizedCrop already resizes to this
+                                        # regardless of the raw 128px .dat resolution
+                                        # (see dino_craters_augmentation.py) - no new
+                                        # preprocessing needed. Interpolated positional
+                                        # embeddings handle the difference from the
+                                        # checkpoint's native 518px training resolution,
+                                        # standard ViT/DINOv2 behavior.
+  local_crops_size: 98                # 14x7, an exact patch_size multiple - matches
+                                        # dinov2/configs/eval/vits14_pretrain.yaml (Meta's
+                                        # own reference config for loading this exact
+                                        # checkpoint), NOT ssl_default_config.yaml's
+                                        # from-scratch default of 96 (96/14 isn't clean)
+  local_crops_number: 6
+
+train:
+  batch_size_per_gpu: 64    # smaller than dino_craters.yaml's 128 - 224px costs far
+                              # more memory per sample than 128px did
+  num_workers: 4
+  OFFICIAL_EPOCH_LENGTH: 100
+  saveckp_freq: 5
+  crater_augmentation: true
+
+optim:
+  epochs: 10                  # short - finetuning adapts existing good features, it
+                                # doesn't need dino_craters.yaml's 100-epoch from-scratch
+                                # budget. 10 * 100 = 1000 iterations total.
+  base_lr: 0.00002             # ~200x lower than the from-scratch default (0.004,
+                                 # tuned for large-batch ImageNet-scale training from
+                                 # nothing) - standard ViT finetuning LR range (1e-5 to
+                                 # 5e-5), aggressive enough to disrupt the pretrained
+                                 # weights fast if left at the from-scratch default.
+  warmup_epochs: 1
+  freeze_last_layer_epochs: 1
+  layerwise_decay: 0.75        # more aggressive than DINOv2's own default (0.9) -
+                                 # early backbone layers (generic edge/texture features,
+                                 # still useful for craters) move very little; later
+                                 # layers adapt more freely to the domain shift.
+  patch_embed_lr_mult: 0.1     # patch_embed is the layer most exposed to the
+                                 # resolution/channel change (224px vs the checkpoint's
+                                 # 518px, replicated-grayscale vs true RGB) - keep it
+                                 # especially stable rather than DINOv2's own 0.2 default.
+
+evaluation:
+  eval_period_iterations: 200   # check latent_separation.png often given the short
+                                  # 1000-iteration schedule - stop early if it degrades
+                                  # rather than waiting for the full budget to run out.
+
+# Prototypical-loss auxiliary supervision (src/train/prototypical_loss.py) -
+# absent from ssl_default_config.yaml's schema entirely (ssl_meta_arch.py
+# reads it via cfg.get("proto", None), so a config without this section at
+# all - e.g. dino_craters.yaml, the from-scratch config - still works
+# unmodified). Draws ONLY from configs/new_test_set_split.csv's
+# "train_pool" half (321 craters) - the "final_test" half and Julie's set
+# are never touched by anything this config controls, by construction.
+proto:
+  enabled: true
+  loss_weight: 0.2          # small and weighted, not a raw unweighted sum - see session
+                              # discussion: the episode's ~20-40 craters/step are a much
+                              # smaller, higher-variance signal than the 50k-crater
+                              # unlabeled pool the rest of the loss sees, so this is meant
+                              # as a gentle nudge, not an equal-weight objective. Watch
+                              # proto_loss in the loss curve/tensorboard before raising it.
+  n_support_per_class: 5     # per episode, per class - the rest of that class's pool
+                              # craters become query for that episode
+  dat_path: "data/processed_wac_100m_new/sigma/100/new_test_set_wide/craters.dat"
+  metadata_csv: "data/processed_wac_100m_new/sigma/100/new_test_set_wide/metadata.csv"
+  split_csv: "configs/new_test_set_split.csv"
+  class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+  crop_size: 224              # matches crops.global_crops_size - same input convention
+                                # the rest of this run's images go through
+  seed: 0

@@ -21,133 +21,142 @@ The goal of this project is to:
 ## Directory Structure
 ```bash
 .
+├── configs/                   # eval_suite.yaml, dino_craters.yaml, crater-ID registries, global scaling
 ├── data/
-│   ├── raw/                  # Original data files (craters CSV and mosaic)
-│   └── processed/            # Preprocessed crater images and metadata
-├── models/                   # Trained models and loss curves
-├── results/                  # Clustering results and visualization figures
-├── logs/                     # Trained models, loss curves and plotting results
+│   ├── raw/                   # Downloaded/derived source files (craters CSV, mosaic, labeled sets)
+│   └── processed_wac_100m_new/  # Preprocessed crater crops + memmaps (per sigma/FOV/offset variant)
+├── logs/                      # Every training run + its eval results, one folder per run
+│   └── {family}/.../{run}/
+│       ├── models/            # autoencoder.pth, loss_curve.png
+│       ├── run_manifest.json  # training params, read by the dashboard
+│       └── eval_results/      # per-checkpoint eval.evaluate() output (see "Evaluation" below)
+├── notebooks/                 # Interactive review/eval notebooks
 ├── src/
-│   ├── data/                 # Preprocessing scripts
-│   ├── train/                # Training scripts for autoencoder
-│   ├── cluster/              # Clustering and plotting scripts
-│   └── display/              # Run model on all craters and Visulization on Moon Mosiac
-├── Snakefile                 # Snakemake workflow
-├── display.py                # Optional visualization script
+│   ├── data/                  # Preprocessing scripts (preprocess_2.py, preprocess_dino.py)
+│   ├── train/                  # Training entry points (train.py, train_dino.py)
+│   ├── models/                 # Model definitions (autoencoder, MAE, vendored dinov2/)
+│   ├── cluster/                 # Clustering and encoding helpers
+│   ├── display/                 # Run a trained model on all craters + visualize on the mosaic
+│   ├── eval/                    # Eval harness (evaluate.py, metrics.py, visualize.py, history.py, ...)
+│   └── dashboard/                # Streamlit dashboard (see "Dashboard" below)
+├── Snakefile                  # Snakemake workflow (preprocessing, training, DINO, eval test sets)
 └── README.md
 ```
 
 ## Setup Instructions
 1. **Clone the repository:**
    ```bash
-   git clone [text](https://github.com/yardenkinreich/autoencoder-project/tree/main)
-    cd autoencoder-project
-    ```
-2. **Create a virtual environment and install dependencies:** # Add explanation
+   git clone https://github.com/yardenkinreich/autoencoder-project.git
+   cd autoencoder-project
+   ```
+2. **Install dependencies** (this project uses [pixi](https://pixi.sh), not a plain venv — `pixi.toml` pins everything, including CUDA-enabled PyTorch):
     ```bash
-    # Using pixi
+    pixi install
+    # then run any command via:
+    pixi run -e default <command>
+    # e.g.:
+    pixi run -e default python -m eval.evaluate --help
     ```
 
-3. Prepare the data:
-    - Download the Robbins crater database: 
-        [Robbins Moon Crater Database](https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins
-    - Download the LRO LROC WAC Mosaic 100m: 
+3. Prepare the data — place these under `data/raw/`:
+    - Robbins crater database:
+        [Robbins Moon Crater Database](https://astrogeology.usgs.gov/search/map/moon_crater_database_v1_robbins) → `lunar_crater_database_robbins_2018.csv`
+    - LRO LROC WAC Mosaic 100m:
         [LRO LROC WAC Mosaic](https://planetarymaps.usgs.gov/mosaic/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif)
-    Place the files in data/raw/.
+
+    The Snakefile doesn't read that mosaic file directly — it expects a locally sigma/high-pass-filtered version at `data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif` (see `src/data/full_mosaic_processing.py` for the filtering step) and a matching `configs/global_scaling.json` (frozen normalization range).
 
 ## Running the Pipeline (with Snakemake)
-1. Configure run name and toggles
-- Edit the top of the Snakefile:
+1. Configure the run — edit the top of the `Snakefile`:
 ```python
-RUN_NAME = "cae_latent20_l2_sched"
-RUN_PREPROCESS = True        # Set to False to skip preprocessing
-RUN_DISPLAY = True           # Set to False to skip display step
-TECHNIQUE = "pca"            # Choose dimensionality reduction technique: "pca" or "tsne"
-LATENT_DIM = 20              # Set latent dimension size
+AUTOENCODER_MODEL = "mae"       # "cae" or "mae"
+LATENT_DIM        = 64          # only used by "cae"
+EPOCHS            = 50
+MASK_RATIO        = 0.75        # only used by "mae"
+MIN_DIAMETER      = 3.0         # crater diameter filter, km
+MAX_DIAMETER      = 10.0
+NUM_SAMPLES       = 25000       # how much of INPUT_DIR to actually train on
+PRETRAINED_WEIGHTS = ""         # path to a .pth checkpoint to fine-tune from; "" = scratch
+NUM_GPUS          = 1           # >1 launches training via torchrun (single node)
 ```
-- Adjust parameters in the different rules as needed: (for example, in the `train` rule)
-```python
-    params:
-        latent_dim=LATENT_DIM,
-        lr=1e-5,
-        weight_decay=1e-5,
-        lr_patience=5,
-        min_lr=1e-8,
-        lr_factor=0.5,
-        num_samples = 50000
-```
+`RUN_DIR` (where everything for this run gets written under `logs/`) is derived automatically from these params — runs with identical settings resume/overwrite the same folder instead of fragmenting into new ones. There's no separate run-name variable to set.
 
-2. Execute the full Snakemake workflow:
+2. Execute the full Snakemake workflow (preprocess → train → cluster/display):
 ```bash
-snakemake --cores all
-``` 
-3. Execute specific steps (optional):
-- Preprocess data only:
-```bash
-snakemake preprocess --cores all
+pixi run -e default snakemake --cores all
 ```
-- Train the model only:
+3. Or execute specific steps:
 ```bash
-snakemake train_autoencoder --cores all
+pixi run -e default snakemake preprocess_craters --cores all     # preprocess only
+pixi run -e default snakemake train_autoencoder --cores all      # train only (assumes preprocess_craters already ran)
 ```
+4. DINOv2 is a separate opt-in pipeline (self-distillation, not reconstruction) — not part of `rule all`:
+```bash
+pixi run -e default snakemake train_dino --cores all
+```
+Configure it via the `DINO_*` variables near the top of the Snakefile (`DINO_EPOCHS`, `DINO_GPUS`, `DINO_CLEAN_OFFSET`) and `configs/dino_craters.yaml`.
 
 ## Pipeline Features
-- Reproducible training: fixed random seed; can limit number of craters for quick experiments.
-- Configurable parameters: Easily adjust latent dimensions, learning rates, and clustering methods.
-- Clustering & visualization: PCA or other techniques to group craters; displayed as dots or images on the mosaic.
-- Toggle steps: Preprocessing, training, and display can be turned on/off independently.
-- Run snapshots: Each Snakemake run creates a snapshot of the workflow for reproducibility.
+- Reproducible training: fixed random seed; a manifest (`run_manifest.json`) is written alongside every checkpoint recording exactly how it was trained.
+- Configurable parameters: latent dimension, epochs, mask ratio, diameter range, pretrained-vs-scratch — all set at the top of the Snakefile.
+- Clustering & visualization: PCA or other techniques group craters; displayed as dots or images on the mosaic (`RUN_DISPLAY`/`RUN_CLUSTER_JULIE` toggles).
+- Held-out test sets: craters reserved for eval are excluded from training automatically (see "Evaluation" below) — they never leak into the training sample.
+- Run snapshots: each Snakemake run copies the `Snakefile` as it was at train time into the run's own log folder, for reproducibility.
 
-## MAE Model
-facebook/vit-mae structure
-Blocks 0-7   (Early):   Edges, textures, basic patterns → KEEP FROZEN
-Blocks 8-15  (Middle):  Part-level features, shapes → MAYBE UNFREEZE
-Blocks 16-23 (Late):    Domain-specific, high-level → DEFINITELY UNFREEZE
-Decoder:                Task-specific reconstruction → ALWAYS UNFREEZE
+## Evaluation
+
+Every trained checkpoint (mae/cae/dino, scratch or pretrained) can be scored against the shared test-set definitions in `configs/eval_suite.yaml`: one or more **labeled** sets (accuracy/F1/QWK/ordinal-MAE/ECE/clustering-agreement/confound checks) plus one **held-out unlabeled** set (reconstruction loss + unsupervised clustering quality).
+
+1. **Materialize the test sets** (one-time, or whenever a set's crater-ID list changes):
+    ```bash
+    pixi run -e default snakemake preprocess_holdout_set    # unlabeled holdout (configs/holdout_crater_ids.csv)
+    pixi run -e default snakemake preprocess_new_test_set   # labeled v-fr/r-fr/r-dr/v-dr set (configs/correct_crater_with_labels_final.csv)
+    ```
+    Both are cut from the same mosaic/offset as training and are automatically excluded from `preprocess_craters`/`preprocess_craters_dino`'s training data.
+
+2. **Run the eval suite** against a checkpoint:
+    ```bash
+    PYTHONPATH=src pixi run -e default python -m eval.evaluate \
+        --checkpoint logs/mae/scratch/none/na/.../ep50/models/autoencoder.pth \
+        --autoencoder-model mae \
+        --config configs/eval_suite.yaml
+    ```
+    `--autoencoder-model` is one of `mae`, `cae`, `dino`, `mae_pretrained`, `dino_pretrained`. Output defaults to `{training_run_dir}/eval_results/<run_id>/` (override with `--out`); useful extra flags: `--skip-holdout` (if the holdout set hasn't been preprocessed yet), `--no-history` (don't append to `logs/eval_history.csv`), `--n-boot` (bootstrap CI resamples, default 2000).
+
+3. **Compare runs by metric**, without the dashboard:
+    ```bash
+    PYTHONPATH=src pixi run -e default python -m eval.history --metric julie_accuracy --top 10
+    ```
+
+## Dashboard
+
+Browse every checkpoint's results (evaluated or not) and compare runs against each other:
+
+```bash
+PYTHONPATH=src pixi run -e default streamlit run src/dashboard/app.py
+```
+
+Opens one app in your browser with two pages (sidebar-navigable):
+- **Run Deep Dive** — pick any trained checkpoint under `logs/`, see its training parameters, artifacts, and full eval results (or a ready-to-run eval command if it hasn't been evaluated yet).
+- **Compare Runs** — filter/group runs by architecture or training parameters, chart metrics side by side, and browse a leaderboard across the full run history.
+
+It reads only what `train.py`/`evaluate.py` already wrote (`logs/eval_history.csv`, `logs/**/eval_results/*/summary.json`, `run_manifest.json`) — nothing is recomputed.
 
 ## Output
-All files are saved under logs/ in a folder with the run name. 
-Key outputs include:
-- Models: models/autoencoder.pth
-- Loss plots: models/loss_curve.png
-- Reconstructions: models/reconstructions.png
-- Latent vectors: results/latents.npy
-- Clustering Labeled Data: results/clustering_dots.png
-- Clustering Labeled Data: results/clustering_imgs.png
-- Classify Unlabled for all Craters: results/crater_clusters_kmeans.csv
-- Classify Unlabled for all Craters: results/crater_clusters_kmeans_clusters.geojson
+All files are saved under `logs/{family}/.../{run}/` (see "Directory Structure" above — the exact path is derived from the run's own parameters). Key outputs include:
+- Model: `models/autoencoder.pth`
+- Loss plot: `models/loss_curve.png`
+- Reconstructions: `models/reconstructions.png`
+- Training params: `run_manifest.json`
+- Clustering (Julie's labeled set): `results/clustering_dots_{technique}.png`, `results/clustering_imgs_{technique}.png`
+- Clustering (all craters, unlabeled): `results/crater_clusters_{n}.csv`, `results/crater_clusters_{n}.geojson`
+- Eval results (once `eval.evaluate` has been run against the checkpoint): `eval_results/<run_id>/` — see "Evaluation" above.
 
+## MAE Model
 
-5. Very small raw sizes (53×53, 83×84) → heavy upsampling
+Structure: `facebook/vit-mae-{base,large,huge}`. When fine-tuning, only unfreeze as many blocks as the target task actually needs — earlier blocks encode more universal, transferable features:
 
-This is something to pay attention to.
-
-A crater that is 53×53 becomes 224×224:
-
-You are upsampling by 4×
-
-Interpolation smooths details
-
-Model sees blurry inputs
-
-This usually causes:
-
-Worse reconstructions
-
-Lower MAE patch accuracy
-
-Blurry outputs
-
-Not a pipeline error — just the nature of your data.
-
-
-
-Facebook MAE Pretrained Models
-base: https://huggingface.co/facebook/vit-mae-base
-large: https://huggingface.co/facebook/vit-mae-large
-huge: https://huggingface.co/facebook/vit-mae-huge
-
-
+```
 ┌─────────────────────────────────────────────────────────┐
 │ ENCODER BLOCKS 0-7: LOW-LEVEL FEATURES                 │
 │ (Keep Frozen ❄️ - Universal Features)                   │
@@ -177,3 +186,10 @@ huge: https://huggingface.co/facebook/vit-mae-huge
 │ Block 20-21: Global context & relationships            │
 │ Block 22-23: Task-specific abstract features           │
 └─────────────────────────────────────────────────────────┘
+
+Decoder: task-specific reconstruction → always unfrozen.
+```
+
+Pretrained weights: [base](https://huggingface.co/facebook/vit-mae-base), [large](https://huggingface.co/facebook/vit-mae-large), [huge](https://huggingface.co/facebook/vit-mae-huge).
+
+**Watch out for small raw crops** (e.g. 53×53, 83×84) getting heavily upsampled to the model's input size (224×224 or 128×128 depending on pipeline) — a 53×53 crop is a ~4× upsample, and interpolation smooths out detail the model then sees as blurry. This shows up as worse reconstructions and lower patch accuracy; it's a property of the source data at that crater's diameter, not a pipeline bug.

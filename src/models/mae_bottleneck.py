@@ -87,6 +87,28 @@ def _checkpoint_bottleneck_dim(state: dict) -> int:
     return state["bottleneck.2.weight"].shape[0]
 
 
+def _checkpoint_patch_and_img_size(state: dict) -> tuple[int, int] | tuple[None, None]:
+    """Auto-detect patch_size (patch_embed's conv kernel size) and img_size
+    (from pos_embed's patch-token count, assuming a square image) directly
+    from the checkpoint. cluster.py's MAE_KWARGS hardcodes this project's
+    current convention (patch_size=8, img_size=128) for every "mae"
+    checkpoint regardless of what it actually was trained with - fine for
+    checkpoints trained under that convention, but a checkpoint trained
+    before it (e.g. facebook/vit-mae-base's original patch_size=16 @ 224px
+    default) then fails to load at all (pos_embed/patch_embed shape
+    mismatch) rather than silently loading wrong. Returns (None, None) if
+    the checkpoint doesn't have these keys at all (shouldn't happen for a
+    real MAE checkpoint, but callers should fall back to their own kwargs)."""
+    w = state.get("patch_embed.proj.weight")
+    pe = state.get("pos_embed")
+    if w is None or pe is None:
+        return None, None
+    patch_size = int(w.shape[-1])          # (embed_dim, in_chans, patch, patch)
+    num_patches = int(pe.shape[1]) - 1     # pos_embed includes the CLS token
+    img_size = round(num_patches ** 0.5) * patch_size
+    return patch_size, img_size
+
+
 def load_mae(checkpoint_path: str = None, device="cpu", **mae_kwargs):
     """
     Build a MAE model for this checkpoint, auto-detecting architecture.
@@ -97,11 +119,21 @@ def load_mae(checkpoint_path: str = None, device="cpu", **mae_kwargs):
       MaskedAutoencoderViTBottleneck with the checkpoint's own bottleneck_dim,
       so old checkpoints load exactly as they were trained.
     - checkpoint has no bottleneck.* weights : plain MaskedAutoencoderViT.
+    - patch_size/img_size are auto-detected from the checkpoint itself
+      (see _checkpoint_patch_and_img_size), overriding whatever mae_kwargs
+      passed in - the resulting model's own model.patch_embed.img_size is
+      the source of truth callers should resize input images to (see
+      eval/pipeline.py's embed() and eval/holdout.py's embed_holdout()),
+      not a hardcoded constant.
     """
     if checkpoint_path is None:
         return MaskedAutoencoderViT(**mae_kwargs).to(device)
 
     state = torch.load(checkpoint_path, map_location=device)
+
+    patch_size, img_size = _checkpoint_patch_and_img_size(state)
+    if patch_size is not None:
+        mae_kwargs = {**mae_kwargs, "patch_size": patch_size, "img_size": img_size}
 
     if _checkpoint_has_bottleneck(state):
         model = MaskedAutoencoderViTBottleneck(

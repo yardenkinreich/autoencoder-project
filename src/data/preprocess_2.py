@@ -123,16 +123,25 @@ def _to_360(lon):
     return lon % 360.0
 
 
-def load_holdout_crater_ids(path):
+def load_holdout_crater_ids(paths):
     """
     Read a held-out crater ID registry — one CRATER_ID per line, or a CSV
     with a CRATER_ID column (only that column is used; extra columns, e.g.
-    a `source` label per set, are ignored here).
+    a `source`/`degree` label per set, are ignored here). Pass a list to
+    union IDs from multiple registries (e.g. the random-unlabeled holdout
+    set AND a separately-tracked labeled test set — both must stay out of
+    training, and callers shouldn't have to pre-merge them into one file).
     """
-    if path.endswith(".csv"):
-        return set(pd.read_csv(path)["CRATER_ID"].astype(str))
-    with open(path) as f:
-        return {line.strip() for line in f if line.strip()}
+    if isinstance(paths, str):
+        paths = [paths]
+    ids = set()
+    for path in paths:
+        if path.endswith(".csv"):
+            ids |= set(pd.read_csv(path)["CRATER_ID"].astype(str))
+        else:
+            with open(path) as f:
+                ids |= {line.strip() for line in f if line.strip()}
+    return ids
 
 
 def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
@@ -152,15 +161,16 @@ def load_and_filter_craters(craters_csv, min_diameter, max_diameter,
         convention are accepted and normalised internally, so e.g. (-180, -120)
         works as well as (180, 240).
 
-    exclude_crater_ids : path to a held-out crater ID registry (see
-        load_holdout_crater_ids). Applied BEFORE craters_to_output subsampling,
-        so held-out craters are guaranteed to never appear in ANY training
-        run's sample regardless of which subset gets drawn — this is what
-        keeps eval sets (Julie's, etc.) actually held out rather than
-        possibly already seen during training by chance.
+    exclude_crater_ids : path (or list of paths) to a held-out crater ID
+        registry (see load_holdout_crater_ids). Applied BEFORE
+        craters_to_output subsampling, so held-out craters are guaranteed to
+        never appear in ANY training run's sample regardless of which subset
+        gets drawn — this is what keeps eval sets (Julie's, the reviewed
+        test set, etc.) actually held out rather than possibly already seen
+        during training by chance.
 
-    only_crater_ids : path to a crater ID registry (same format). The
-        opposite of exclude_crater_ids — restricts the filtered pool to ONLY
+    only_crater_ids : path (or list of paths) to a crater ID registry (same
+        format). The opposite of exclude_crater_ids — restricts the filtered pool to ONLY
         these craters (still subject to the diameter/latitude/longitude
         filters above). Use to materialize a held-out set's actual image
         data for eval (e.g. --only_crater_ids configs/holdout_crater_ids.csv),
@@ -442,21 +452,23 @@ if __name__ == '__main__':
                              "[lo, hi] band, e.g. the seam strip. Accepts -180..180 "
                              "or 0..360; may wrap (lo>hi). Omit to keep all longitudes.")
     parser.add_argument('--craters_to_output',    type=int,   default=-1)
-    parser.add_argument('--exclude_crater_ids',   default=None,
-                        help="Path to a held-out crater ID registry (one CRATER_ID "
-                             "per line, or a CSV with a CRATER_ID column). Applied "
-                             "before --craters_to_output subsampling, so these craters "
+    parser.add_argument('--exclude_crater_ids',   nargs='+', default=None,
+                        help="One or more held-out crater ID registries (each: one "
+                             "CRATER_ID per line, or a CSV with a CRATER_ID column) - "
+                             "IDs are unioned across all of them. Applied before "
+                             "--craters_to_output subsampling, so these craters "
                              "never appear in training data regardless of which subset "
-                             "gets drawn. Use for any crater set reserved for eval "
-                             "(e.g. configs/holdout_crater_ids.csv).")
-    parser.add_argument('--only_crater_ids',      default=None,
+                             "gets drawn. Use for every crater set reserved for eval "
+                             "(e.g. configs/holdout_crater_ids.csv "
+                             "configs/correct_crater_with_labels_final.csv).")
+    parser.add_argument('--only_crater_ids',      nargs='+', default=None,
                         help="Opposite of --exclude_crater_ids: restrict output to "
-                             "ONLY these craters. Use to materialize a held-out set's "
-                             "actual image data for eval.")
+                             "ONLY these craters (unioned if more than one path). Use "
+                             "to materialize a held-out set's actual image data for eval.")
     parser.add_argument('--save_raw_crops',       action='store_true')
     parser.add_argument('--save_np_array',        action='store_true')
     parser.add_argument('--autoencoder_model',    type=str,
-                        choices=['cae', 'mae'],   default='mae')
+                        choices=['cae', 'mae', 'dino'],   default='mae')
 
     # ── normalization control ────────────────────────────────────────────────
     parser.add_argument('--norm_mode', choices=['raw', 'global', 'per_sample'],

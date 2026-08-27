@@ -181,6 +181,7 @@ def do_train(cfg, model, resume=False):
             cfg.crops.local_crops_number,
             global_crops_size=cfg.crops.global_crops_size,
             local_crops_size=cfg.crops.local_crops_size,
+            in_chans=cfg.student.in_chans,
         )
     elif cfg.train.cell_augmentation:
         data_transform = CellAugmentationDINO(

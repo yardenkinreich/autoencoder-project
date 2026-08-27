@@ -1,0 +1,10 @@
+{
+  "lo": -0.03925725817680359,
+  "hi": 0.04580375552177429,
+  "lo_pct": 1.0,
+  "hi_pct": 99.0,
+  "source": "data/processed_wac_100m_new/sigma/100/dino_wide_raw_TEMP/craters_wide_raw.dat",
+  "n_sampled": 20000,
+  "raw_min": -0.0701066106557846,
+  "raw_max": 0.09978315234184265
+}

@@ -103,13 +103,15 @@ def main(args):
         latents = np.concatenate(latents_list, axis=0)
         np.save(args.latent_output, latents)
 
-    elif args.autoencoder_model == "mae":
-        # encode_images (from updated latent_space.py / cluster.py) already
-        # uses MAE_KWARGS with img_size=128 / patch_size=8
+    else:
+        # mae / dino / dino_pretrained / mae_pretrained all go through the
+        # same generic build_model()/ENCODE_FNS dispatch in cluster.py - one
+        # place that knows how to turn (autoencoder_model, model, imgs) into
+        # an embedding, so nothing architecture-specific is needed here.
         encode_images(
             loader, args.model_path, args.bottleneck, device,
             args.latent_output, args.latent_output,
-            autoencoder_model="mae",
+            autoencoder_model=args.autoencoder_model,
             is_dataloader=True,
         )
         latents = np.load(args.latent_output)
@@ -175,7 +177,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path",        required=True)
-    parser.add_argument("--autoencoder_model",  choices=["cae", "mae"], default="mae")
+    parser.add_argument("--autoencoder_model",  default="mae",
+                        choices=["cae", "mae", "dino", "dino_pretrained", "mae_pretrained"])
     parser.add_argument("--dataset_path",      required=True)
     parser.add_argument("--metadata_path",     required=True)
     parser.add_argument("--num_clusters",      type=int,   default=5)
@@ -187,7 +190,8 @@ if __name__ == "__main__":
     parser.add_argument("--latent_output",     default="latents_all.npy")
     parser.add_argument("--use_gpu",           action="store_true")
     parser.add_argument("--bottleneck",        type=int,   default=64)
-    parser.add_argument("--cluster_method",    choices=["kmeans", "gmm"], default="kmeans")
+    parser.add_argument("--cluster_method",    default="kmeans",
+                        choices=["kmeans", "gmm", "hdbscan", "spectral", "agglomerative"])
     parser.add_argument("--device",            default="cuda")
     args = parser.parse_args()
     main(args)

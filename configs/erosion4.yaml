@@ -8,7 +8,7 @@ seed: 0
 latent_dim: 768          # MAE embed_dim; only used by the synthetic fallback
 
 # real-pipeline inputs (consumed in pipeline.embed):
-checkpoint: "models/autoencoder.pth"        # MAE retrained on GLOBAL scaling
+checkpoint: "logs/mae/wac100m_sigma100_noband_global/d3-10_ep500_mask0.75_n25000/models/autoencoder.pth"        # MAE retrained on GLOBAL scaling
 imgs_dir:  "data/raw/craters_for_danny"     # Julie's labeled PNGs
 scaling_json: "configs/global_scaling.json" # frozen (lo,hi) from fit_global_scaling.py
 png_max: 255                                # 8-bit PNG ceiling

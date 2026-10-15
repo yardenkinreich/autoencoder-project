@@ -42,8 +42,23 @@ def main():
     idx = rng.choice(args.n, size=min(args.sample, args.n), replace=False)
     pixels = np.asarray(mm[np.sort(idx)]).reshape(-1)
 
-    lo = float(np.percentile(pixels, args.lo_pct))
-    hi = float(np.percentile(pixels, args.hi_pct))
+    # nan-aware, and LOUD about it. np.percentile returns NaN if even one
+    # sampled pixel is NaN, and a NaN lo/hi silently normalizes every
+    # downstream crop to NaN - which is exactly what happened once: a mosaic
+    # with NaN holes in 0.0002% of its pixels put a NaN in ~1 crop in 2000,
+    # this wrote {"lo": NaN, "hi": NaN}, and all 642 test-set crops came out
+    # 100% NaN with nothing raising anywhere. Report the contamination, fit
+    # on the finite pixels, and refuse to write a non-finite scaling file.
+    n_nan = int(np.isnan(pixels).sum())
+    if n_nan:
+        print(f"  WARNING: {n_nan:,}/{pixels.size:,} sampled pixels are NaN "
+              f"({100.0 * n_nan / pixels.size:.6f}%) - fitting on the finite ones. "
+              f"Check the source mosaic's nodata handling.")
+    lo = float(np.nanpercentile(pixels, args.lo_pct))
+    hi = float(np.nanpercentile(pixels, args.hi_pct))
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        raise ValueError(f"non-finite percentiles lo={lo} hi={hi} - refusing to write a "
+                         f"scaling file that would normalize every crop to NaN.")
     if hi <= lo:
         raise ValueError(f"degenerate percentiles lo={lo} hi={hi}; is the .dat raw?")
 
@@ -51,7 +66,9 @@ def main():
         "lo": lo, "hi": hi,
         "lo_pct": args.lo_pct, "hi_pct": args.hi_pct,
         "source": args.clean_dat, "n_sampled": len(idx),
-        "raw_min": float(pixels.min()), "raw_max": float(pixels.max()),
+        # nan-aware for the same reason as the percentiles above
+        "raw_min": float(np.nanmin(pixels)), "raw_max": float(np.nanmax(pixels)),
+        "n_nan_sampled": n_nan,
     }
     json.dump(out, open(args.out, "w"), indent=2)
     print(f"global scaling frozen -> {args.out}")

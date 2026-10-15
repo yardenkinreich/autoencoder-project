@@ -94,6 +94,19 @@ def _empty_record(param_source: str = "unknown") -> dict:
         "proto_loss_weight": None,
         "proto_n_support_per_class": None,
         "proto_split_csv": None,
+        # Which CraterAugmentationDINO recipe trained this DINO checkpoint -
+        # see train_dino.py's _write_run_manifest() / dino_craters_
+        # augmentation.py's AUGMENTATION_RECIPE_VERSION. None for MAE/CAE
+        # runs and any DINO run that predates this field.
+        "augmentation_recipe": None,
+        # "diet_cp" for a checkpoint produced by src/train/diet_cp.py
+        # (source="diet-cp" in its own run_manifest.json) - None for every
+        # DINO self-distillation run (scratch/finetune) and all MAE/CAE.
+        # This is a different training METHOD, not a hyperparameter of the
+        # usual DINO recipe.
+        "training_method": None,
+        "diet_cp_unfreeze_last_n_blocks": None,
+        "diet_cp_freeze_epochs": None,
     }
 
 

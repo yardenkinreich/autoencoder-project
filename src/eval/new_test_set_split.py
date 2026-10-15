@@ -59,15 +59,51 @@ def build_split(metadata_csv: str = DEFAULT_METADATA_CSV, labels_csv: str = DEFA
     return out[["crater_id", "degree", "split"]]
 
 
+def extend_split(base_split_csv: str, labels_csv: str,
+                 class_names: list[str] = DEFAULT_CLASS_NAMES, seed: int = 0) -> pd.DataFrame:
+    """Split a NEW label set without moving any crater of an existing split.
+
+    Craters already in base_split_csv keep their half - so the old
+    final_test stays untouched and no crater ever crosses from test into
+    training. Craters new to labels_csv are split 50/50, stratified by class
+    with the same seed convention. Every crater takes its class from
+    labels_csv (the new labels are authoritative); base craters absent from
+    labels_csv are dropped.
+    """
+    labels = pd.read_csv(labels_csv, dtype={"CRATER_ID": str})
+    labels = labels[labels["degree"].isin(class_names)]
+    base = pd.read_csv(base_split_csv, dtype={"crater_id": str})
+    keep = dict(zip(base["crater_id"], base["split"]))
+    out = pd.DataFrame({"crater_id": labels["CRATER_ID"], "degree": labels["degree"]})
+    out["split"] = out["crater_id"].map(keep)
+    new = out["split"].isna()
+    tr, _ = train_test_split(out.index[new], test_size=0.5,
+                             stratify=out.loc[new, "degree"], random_state=seed)
+    out.loc[new, "split"] = "final_test"
+    out.loc[tr, "split"] = "train_pool"
+    out["origin"] = "new_split"
+    out.loc[~new, "origin"] = "kept_from_base"
+    return out.reset_index(drop=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--extend", default=None, metavar="BASE_SPLIT_CSV",
+                    help="Extend an existing split to --labels-csv instead of "
+                         "re-splitting: base craters keep their half, new ones are "
+                         "split 50/50 stratified. E.g. --extend configs/new_test_set_split.csv "
+                         "--labels-csv configs/liorr_labels.csv --out configs/liorr_labels_split.csv")
     ap.add_argument("--metadata-csv", default=DEFAULT_METADATA_CSV)
     ap.add_argument("--labels-csv", default=DEFAULT_LABELS_CSV)
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    split = build_split(args.metadata_csv, args.labels_csv, seed=args.seed)
+    if args.extend:
+        split = extend_split(args.extend, args.labels_csv, seed=args.seed)
+        print("kept from base / newly split:", split["origin"].value_counts().to_dict())
+    else:
+        split = build_split(args.metadata_csv, args.labels_csv, seed=args.seed)
 
     print("Per-class counts by split:")
     print(split.groupby(["degree", "split"]).size().unstack(fill_value=0))

@@ -56,6 +56,18 @@ def flatten_results(all_results: dict) -> dict:
         "checkpoint": all_results["checkpoint"],
         "autoencoder_model": all_results["autoencoder_model"],
         "tag": all_results.get("tag"),
+        # Which KIND of evaluation produced this row. None/absent = the
+        # standard eval.evaluate suite (unsupervised k-means + Hungarian
+        # alignment over every labeled set). Anything else is a different
+        # protocol writing a deliberately different, usually narrower set
+        # of columns - e.g. supervised_probe.py, which only ever scores
+        # new_set_final_test and has no alignment/geometry/confound
+        # sections at all. build_registry() (dashboard/data.py) keys "the
+        # latest eval for this checkpoint" off these rows, so without this
+        # column a non-standard run silently becomes the dashboard's whole
+        # view of a checkpoint just by being the most recent - which is
+        # exactly what happened to the off-the-shelf DINOv2 entry.
+        "eval_kind": all_results.get("eval_kind"),
     }
 
     for name, r in all_results.get("labeled_sets", {}).items():
@@ -69,8 +81,17 @@ def flatten_results(all_results: dict) -> dict:
         row[f"{name}_ari"] = r["agreement"]["ari"]
         row[f"{name}_nmi"] = r["agreement"]["nmi"]
         row[f"{name}_v_measure"] = r["agreement"]["v_measure"]
-        row[f"{name}_purity"] = r["alignment"]["purity"]
-        row[f"{name}_boundary_uncertainty"] = r["boundary_uncertainty"]["boundary_uncertainty"]
+        # Only meaningful for an UNSUPERVISED cluster assignment (Hungarian-
+        # matched purity, latent-space class-blur) - absent for a run like
+        # supervised_probe.py's, which predicts real classes directly, with
+        # no cluster/alignment step to have a purity or boundary-blur
+        # reading in the first place. .get() rather than a hard key lookup
+        # so that eval type doesn't need to fake placeholder values just to
+        # satisfy this schema.
+        if "alignment" in r:
+            row[f"{name}_purity"] = r["alignment"]["purity"]
+        if "boundary_uncertainty" in r:
+            row[f"{name}_boundary_uncertainty"] = r["boundary_uncertainty"]["boundary_uncertainty"]
 
     holdout = all_results.get("holdout")
     if holdout:

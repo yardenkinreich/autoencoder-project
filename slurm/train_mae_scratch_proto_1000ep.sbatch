@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=mae-scratch-proto-1000ep
 #SBATCH --partition=normal
-#SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:h200:2
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=72:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output=logs/slurm-%x-%j.out
 
 # Same as train_mae_scratch_1000ep.sbatch (identical architecture/data/LR
@@ -25,6 +25,13 @@
 #
 # Resumable: re-submitting this script after a timeout/interruption picks up
 # from checkpoint_last.pth automatically (checkpoint_every=20, the default).
+#
+# 2 GPUs via torchrun/DDP - see train_mae_scratch_1000ep.sbatch's comment
+# for the utilization diagnostic that motivated this. --proto_enabled's
+# DDP interaction was confirmed separately with a 2-GPU smoke test
+# (embed_for_proto's model.module.forward_encoder() call still syncs
+# correctly under DDP - job 148). --batch_size is PER GPU (effective total
+# 256).
 
 set -uo pipefail
 cd "$SLURM_SUBMIT_DIR"
@@ -42,7 +49,7 @@ if [ -f "$OUTPUT_DIR/models/checkpoint_last.pth" ]; then
     RESUME_ARGS=(--resume "$OUTPUT_DIR/models/checkpoint_last.pth")
 fi
 
-PYTHONPATH=$(pwd) python src/train/train.py \
+PYTHONPATH=$(pwd) torchrun --standalone --nproc_per_node=2 src/train/train.py \
   --autoencoder_model mae \
   --input data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_aug.dat \
   --model_output "$OUTPUT_DIR/models/autoencoder.pth" \

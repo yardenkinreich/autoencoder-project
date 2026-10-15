@@ -80,6 +80,11 @@ def canonical_run_dir(manifest: dict, run_datetime: str | None = None) -> str:
     elif family == "cae":
         ld = manifest.get("latent_dim")
         other_metric = f"lat{ld}" if ld is not None else "latunknown"
+    elif family == "dino" and manifest.get("dino_objective"):
+        # "ssl" (self-distillation only) vs "ssl+proto" (+ prototypical
+        # loss). Only manifests that STATE it get the slot - older DINO runs
+        # predate the field and keep "na", so no existing run dir moves.
+        other_metric = manifest["dino_objective"].replace("+", "_")
     else:
         other_metric = "na"
 

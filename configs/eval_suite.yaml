@@ -34,13 +34,57 @@ png_max: 255
 #     never for embedding (that reads dat_path directly). class_names
 #     overrides the top-level default above for this set only.
 labeled_sets:
+  # ── PRIMARY: Kaguya TC, the baseline labels (configs/liorr_labels.csv) ──────
+  # Listed first on purpose: evaluate.py writes sets in this order and the
+  # dashboard's first "Eval results" tab (its default) is the first set.
+  # 224 px native-resolution crops at 2xD (data/catalogs/kaguya_tco_*), built
+  # by slurm/kaguya_eval_suite.sbatch; 1,030 of the 1,162 labels lie inside
+  # Kaguya's 60S-60N coverage. Normalization = each catalog's loader policy.
+  kaguya_tco_ratio__robust:
+    dat_path: "data/evalsets/s224/kaguya_tco_ratio__robust/craters.dat"
+    metadata_csv: "data/evalsets/s224/kaguya_tco_ratio__robust/metadata.csv"
+    imgs_dir: "data/evalsets/s224/kaguya_tco_ratio__robust/crater_crops"
+    labels_csv: "configs/liorr_labels.csv"
+    class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+    # the FULL label set includes configs/liorr_labels_split.csv's train_pool
+    # half - evaluate.py skips it for a prototypical-loss checkpoint
+    leaks_proto_train_pool: true
+  kaguya_tco_ratio__robust_final_test:
+    dat_path: "data/evalsets/s224/kaguya_tco_ratio__robust/craters.dat"
+    metadata_csv: "data/evalsets/s224/kaguya_tco_ratio__robust/metadata.csv"
+    imgs_dir: "data/evalsets/s224/kaguya_tco_ratio__robust/crater_crops"
+    labels_csv: "configs/liorr_labels.csv"
+    class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+    id_split_csv: "configs/liorr_labels_split.csv"
+    id_split_value: "final_test"
+  kaguya_tco_raw__asinh:
+    dat_path: "data/evalsets/s224/kaguya_tco_raw__asinh/craters.dat"
+    metadata_csv: "data/evalsets/s224/kaguya_tco_raw__asinh/metadata.csv"
+    imgs_dir: "data/evalsets/s224/kaguya_tco_raw__asinh/crater_crops"
+    labels_csv: "configs/liorr_labels.csv"
+    class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+    leaks_proto_train_pool: true
+  kaguya_tco_raw__asinh_final_test:
+    dat_path: "data/evalsets/s224/kaguya_tco_raw__asinh/craters.dat"
+    metadata_csv: "data/evalsets/s224/kaguya_tco_raw__asinh/metadata.csv"
+    imgs_dir: "data/evalsets/s224/kaguya_tco_raw__asinh/crater_crops"
+    labels_csv: "configs/liorr_labels.csv"
+    class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+    id_split_csv: "configs/liorr_labels_split.csv"
+    id_split_value: "final_test"
+  # ── WAC comparison sets ────────────────────────────────────────────────────
   julie:
     imgs_dir: "data/raw/craters_for_danny"
+    # Bigger than plot_unsupervised_cluster_images' own default (0.18,
+    # tuned against new_set_final_test's 321-crater point cloud) - the same
+    # zoom value reads smaller here since julie's set is only 150 craters,
+    # spread differently across the same-size plot canvas.
+    unsupervised_crop_zoom: 0.28
   new_set:
     dat_path: "data/processed_wac_100m_new/sigma/100/new_test_set/craters.dat"
     metadata_csv: "data/processed_wac_100m_new/sigma/100/new_test_set/metadata.csv"
     imgs_dir: "data/processed_wac_100m_new/sigma/100/new_test_set/crater_crops"
-    labels_csv: "configs/correct_crater_with_labels_final.csv"
+    labels_csv: "configs/liorr_labels.csv"
     class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
   # Same set/FOV/labels as new_set, restricted to the "final_test" half of
   # configs/new_test_set_split.csv (321 of the 642 craters) - the other half
@@ -56,9 +100,9 @@ labeled_sets:
     dat_path: "data/processed_wac_100m_new/sigma/100/new_test_set/craters.dat"
     metadata_csv: "data/processed_wac_100m_new/sigma/100/new_test_set/metadata.csv"
     imgs_dir: "data/processed_wac_100m_new/sigma/100/new_test_set/crater_crops"
-    labels_csv: "configs/correct_crater_with_labels_final.csv"
+    labels_csv: "configs/liorr_labels.csv"
     class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
-    id_split_csv: "configs/new_test_set_split.csv"
+    id_split_csv: "configs/liorr_labels_split.csv"
     id_split_value: "final_test"
 
 # No "holdout:" section - the random-unlabeled holdout set

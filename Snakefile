@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import datetime
 import shutil
@@ -44,7 +45,11 @@ HOLDOUT_DIR = "data/processed_wac_100m_new/sigma/100/holdout"
 # by `snakemake preprocess_new_test_set` since it needs its own diameter
 # bounds (~1-4.2km - this set skews smaller than MIN_DIAMETER/MAX_DIAMETER's
 # 3-10km training range) rather than reusing the training config's.
-NEW_TEST_SET_IDS = "configs/correct_crater_with_labels_final.csv"
+NEW_TEST_SET_IDS = "configs/liorr_labels.csv"
+# THE baseline labeled test set (1,162 craters, from liorr's relabeling; 764
+# overlap the old set). The previous set stays excluded from training too, so
+# no crater that was ever a labeled test crater leaks into a training pool.
+OLD_TEST_SET_IDS = "configs/correct_crater_with_labels_final.csv"
 NEW_TEST_SET_DIR = "data/processed_wac_100m_new/sigma/100/new_test_set"
 # NEW_TEST_SET_DIR_WIDE (DINO-FOV variant) is defined alongside the
 # preprocess_new_test_set rule below, next to NEW_TEST_SET_OFFSETS.
@@ -109,6 +114,27 @@ DINO_EPOCHS       = 100
 DINO_CLEAN_OFFSET = 1.0   # ~2x diameter FOV (vs MAE's 0.5) — see preprocess_2.py --clean_offset
 
 DINO_INPUT_DIR = f"{os.path.dirname(os.path.dirname(INPUT_DIR))}/dino_wide"
+
+# DINO data source. "" = the WAC dino_wide .dat above (unchanged behaviour).
+# Set to a src/data/build_catalog.py catalog directory to train on it instead,
+# e.g. "data/catalogs/kaguya_tco_ratio" (native 8.4 m/px Kaguya TC crops; needs
+# its loader.json - run slurm/catalog_postprocess.sbatch on it first). The
+# run dir then takes its data_tag and diameter range from the catalog itself,
+# and train_dino.py reads the image FOV from its manifest. The finetune
+# config's proto: section must then also point at a catalog (proto.catalog) -
+# train_dino.py refuses a WAC .dat episode pool next to catalog training.
+DINO_CATALOG = ""
+if DINO_CATALOG:
+    _dino_cat_manifest = json.load(open(f"{DINO_CATALOG}/catalog_manifest.json"))
+    DINO_DATA      = f"{DINO_CATALOG}/index.csv"
+    DINO_INPUT_ARG = DINO_CATALOG
+    DINO_DATA_TAG  = os.path.basename(DINO_CATALOG.rstrip("/"))
+    DINO_DIAMETERS = [float(d) for d in _dino_cat_manifest["diameter_km"]]
+else:
+    DINO_DATA      = f"{DINO_INPUT_DIR}/craters_wide.dat"
+    DINO_INPUT_ARG = DINO_DATA
+    DINO_DATA_TAG  = f"{DATA_TAG}_wide"
+    DINO_DIAMETERS = [MIN_DIAMETER, MAX_DIAMETER]
 # Same canonical-path computation as RUN_DIR above.
 DINO_RUN_DIR = canonical_run_dir({
     "family": "dino",
@@ -118,8 +144,8 @@ DINO_RUN_DIR = canonical_run_dir({
     "mask_ratio": None,
     "latent_dim": None,
     "num_samples": None,
-    "diameter_range": [MIN_DIAMETER, MAX_DIAMETER],
-    "data_tag": f"{DATA_TAG}_wide",
+    "diameter_range": DINO_DIAMETERS,
+    "data_tag": DINO_DATA_TAG,
     "freeze_until": None,
 })
 
@@ -133,6 +159,11 @@ DINO_RUN_DIR = canonical_run_dir({
 # the from-scratch architecture).
 DINO_FINETUNE_EPOCHS = 10
 DINO_FINETUNE_PRETRAINED = "data/raw/pretrained/dinov2_vits14_pretrain.pth"
+# True = self-distillation + prototypical loss (config's proto: section; on a
+# catalog its episodes come from <catalog>/testset's train_pool half of
+# configs/liorr_labels_split.csv). False = self-distillation only. The two
+# land in different run dirs (.../ssl_proto/... vs .../ssl/...).
+DINO_FINETUNE_PROTO = True
 DINO_FINETUNE_RUN_DIR = canonical_run_dir({
     "family": "dino",
     "source": "finetune",
@@ -141,9 +172,10 @@ DINO_FINETUNE_RUN_DIR = canonical_run_dir({
     "mask_ratio": None,
     "latent_dim": None,
     "num_samples": None,
-    "diameter_range": [MIN_DIAMETER, MAX_DIAMETER],
-    "data_tag": f"{DATA_TAG}_wide",
+    "diameter_range": DINO_DIAMETERS,
+    "data_tag": DINO_DATA_TAG,
     "freeze_until": None,
+    "dino_objective": "ssl+proto" if DINO_FINETUNE_PROTO else "ssl",
 })
 
 # --- Rule all ---
@@ -167,7 +199,8 @@ rule preprocess_craters:
         map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
         craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
         scaling_json = "configs/global_scaling.json",
-        new_test_set_ids = NEW_TEST_SET_IDS
+        new_test_set_ids = NEW_TEST_SET_IDS,
+        old_test_set_ids = OLD_TEST_SET_IDS
     output:
         output_dir_clean = directory(f"{INPUT_DIR}/crater_crops_clean"),
         output_dir_aug   = directory(f"{INPUT_DIR}/crater_crops_aug"),
@@ -199,7 +232,7 @@ rule preprocess_craters:
             --save_np_array \
             --autoencoder_model {params.autoencoder_model} \
             --exclude_lon_bounds 180 270 \
-            --exclude_crater_ids {input.new_test_set_ids} \
+            --exclude_crater_ids {input.new_test_set_ids} {input.old_test_set_ids} \
             --norm_mode global \
             --scaling_json {input.scaling_json}
 
@@ -298,8 +331,8 @@ rule preprocess_new_test_set:
     wildcard_constraints:
         fov = "|_wide"
     params:
-        min_diameter = 1.0,
-        max_diameter = 5.0,
+        min_diameter = 1.0,     # the liorr labels span 1.0-14.9 km; 1-5 km was the
+        max_diameter = 15.0,    # old set's band (~1-4.2 km) and would drop 1 in 10
         lat_min      = -60,
         lat_max      = 60,
         clean_offset = lambda wildcards: NEW_TEST_SET_OFFSETS[wildcards.fov]
@@ -380,7 +413,8 @@ rule preprocess_craters_dino:
         map_file    = "data/raw/wac_mosaic_new_version/sigma/100/highpass_filtered_lunar_mosaic.tif",
         craters_csv = "data/raw/lunar_crater_database_robbins_2018.csv",
         scaling_json = "configs/global_scaling.json",
-        new_test_set_ids = NEW_TEST_SET_IDS
+        new_test_set_ids = NEW_TEST_SET_IDS,
+        old_test_set_ids = OLD_TEST_SET_IDS
     output:
         output_dir_clean = directory(f"{DINO_INPUT_DIR}/crater_crops"),
         np_output_clean  = f"{DINO_INPUT_DIR}/craters_wide.dat",
@@ -409,7 +443,7 @@ rule preprocess_craters_dino:
             --save_np_array \
             --autoencoder_model mae \
             --exclude_lon_bounds 180 270 \
-            --exclude_crater_ids {input.new_test_set_ids} \
+            --exclude_crater_ids {input.new_test_set_ids} {input.old_test_set_ids} \
             --norm_mode global \
             --scaling_json {input.scaling_json}
         """
@@ -422,23 +456,24 @@ rule train_dino:
     # portable checkpoint - see src/models/dino_backbone.py). Track the
     # latter, since that's what downstream encode/cluster actually loads.
     input:
-        data = f"{DINO_INPUT_DIR}/craters_wide.dat"
+        data = DINO_DATA
     output:
         model = f"{DINO_RUN_DIR}/eval/final/teacher_checkpoint.pth"
     params:
+        input_arg    = DINO_INPUT_ARG,
         output_dir   = DINO_RUN_DIR,
         epochs       = DINO_EPOCHS,
         num_gpus     = DINO_GPUS,
-        min_diameter = MIN_DIAMETER,
-        max_diameter = MAX_DIAMETER,
-        data_tag     = f"{DATA_TAG}_wide"   # matches DINO_RUN_DIR - DINO trains on a
+        min_diameter = DINO_DIAMETERS[0],
+        max_diameter = DINO_DIAMETERS[1],
+        data_tag     = DINO_DATA_TAG        # matches DINO_RUN_DIR - DINO trains on a
                                              # genuinely different (wider-FOV) data export
                                              # than MAE/CAE, not just a differently-named copy
     shell:
         """
         PYTHONPATH=$(pwd) torchrun --standalone --nproc_per_node={params.num_gpus} \
             src/train/train_dino.py \
-            --input {input.data} \
+            --input {params.input_arg} \
             --output_dir {params.output_dir} \
             --epochs {params.epochs} \
             --min_diameter {params.min_diameter} \
@@ -452,23 +487,25 @@ rule train_dino_finetune:
     # configs/dino_craters_finetune.yaml for why this needs its own config
     # rather than an --opts override on top of dino_craters.yaml.
     input:
-        data = f"{DINO_INPUT_DIR}/craters_wide.dat"
+        data = DINO_DATA
     output:
         model = f"{DINO_FINETUNE_RUN_DIR}/eval/final/teacher_checkpoint.pth"
     params:
+        input_arg    = DINO_INPUT_ARG,
         output_dir   = DINO_FINETUNE_RUN_DIR,
         config_file  = "configs/dino_craters_finetune.yaml",
         epochs       = DINO_FINETUNE_EPOCHS,
         num_gpus     = DINO_GPUS,
         pretrained   = DINO_FINETUNE_PRETRAINED,
-        min_diameter = MIN_DIAMETER,
-        max_diameter = MAX_DIAMETER,
-        data_tag     = f"{DATA_TAG}_wide"
+        min_diameter = DINO_DIAMETERS[0],
+        max_diameter = DINO_DIAMETERS[1],
+        data_tag     = DINO_DATA_TAG,
+        proto_flag   = "" if DINO_FINETUNE_PROTO else "--no_proto"
     shell:
         """
         PYTHONPATH=$(pwd) torchrun --standalone --nproc_per_node={params.num_gpus} \
             src/train/train_dino.py \
-            --input {input.data} \
+            --input {params.input_arg} {params.proto_flag} \
             --output_dir {params.output_dir} \
             --config_file {params.config_file} \
             --epochs {params.epochs} \

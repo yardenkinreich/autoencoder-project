@@ -71,6 +71,17 @@ def _parse_dataset_str(dataset_str: str):
         class_ = CHAMMI_HPA
     elif name == "Craters":
         class_ = Craters
+    elif name == "CraterCatalog":
+        # Deferred import, NOT module-level: crater_catalog_dataset imports
+        # ExtendedVisionDataset, which initializes dinov2.data, which imports
+        # this module - so a top-level import here breaks any code that
+        # imports crater_catalog_dataset directly (the artifact analysis does).
+        from src.data.crater_catalog_dataset import CraterCatalog
+        # raw/native catalogs from src/data/build_catalog.py. Normalization
+        # and resize policy come from a JSON file (this parser cannot carry
+        # "=" or ":" inside a value), resolved as: extra=<path.json> >
+        # {root}/loader.json > raise. See crater_catalog_dataset.py.
+        class_ = CraterCatalog
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 

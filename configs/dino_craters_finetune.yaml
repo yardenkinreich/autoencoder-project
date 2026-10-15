@@ -34,6 +34,12 @@ student:
 teacher:
   in_chans: 3
   channel_adaptive: false
+  # Teacher temperature 0.04 -> 0.07. ssl_default_config warms it up over 30
+  # epochs (built for 100+ epoch ImageNet runs) - on a 30-epoch finetune that
+  # spans the whole run, so the teacher never settles and the DINO/iBOT
+  # cross-entropies climb with its entropy to the very end (measured on the
+  # first Kaguya runs). 5 epochs: settled by iteration 500.
+  warmup_teacher_temp_epochs: 5
 
 dino:
   # The stock checkpoint is backbone-only (no head/prototype weights at
@@ -44,8 +50,33 @@ dino:
   head_n_prototypes: 4096
 
 crops:
-  global_crops_scale: [0.6, 1.0]     # unchanged from dino_craters.yaml - about how
-  local_crops_scale: [0.25, 0.6]      # DINO samples views, not weight compatibility
+  # Matches stock DINOv2's own ssl_default_config.yaml exactly (global
+  # [0.32,1.0], local [0.05,0.32]) - the previous values ([0.6,1.0] /
+  # [0.25,0.6], "unchanged from dino_craters.yaml") gave local and global
+  # crops nearly the same field of view: in linear terms (RandomResizedCrop's
+  # scale is an AREA fraction) local spanned sqrt(0.25)-sqrt(0.6) = 50%-77%
+  # of the base image and global 77%-100% - adjacent, overlapping ranges,
+  # not the sharp scale contrast stock DINO relies on to make local/global
+  # correspondence a real task. On our crop_crater() geometry (window =
+  # diameter*(1+fov), fov=1.0 for dino_wide, resized to a fixed 128px base
+  # image), that meant even the SMALLEST local crop (linear 50% of a
+  # diameter*2-wide window = diameter*1.0) always contained the crater's
+  # entire diameter - never a genuine local sub-patch, always ~the whole
+  # crater. A coarse whole-image statistic like brightness is trivially
+  # sufficient to solve "do these two views agree" when the views are this
+  # similar in scale, regardless of augmentation strength - a different,
+  # independent hypothesis from the GaussianBlur-probability-inversion fix
+  # (see dino_craters_augmentation.py's v3 comment) and not ruled out by it.
+  global_crops_scale: [0.32, 1.0]    # only used by global_crops_mode: random
+  local_crops_scale: [0.05, 0.32]
+  # Teacher views hard-wired (see dino_craters_augmentation.py): global crop
+  # 1 = the whole image (crater + context, image_fov_diameters wide), global
+  # crop 2 = centre crop exactly zoom_diameters wide (1.0 = the crater rim to
+  # rim). image_fov_diameters must match the data: 2.0 for the wide
+  # (offset 1.0) WAC dino_wide sets and the Kaguya catalogs.
+  global_crops_mode: context_zoom
+  image_fov_diameters: 2.0
+  zoom_diameters: 1.0
   global_crops_size: 224              # RandomResizedCrop already resizes to this
                                         # regardless of the raw 128px .dat resolution
                                         # (see dino_craters_augmentation.py) - no new
@@ -112,8 +143,38 @@ proto:
                               # craters become query for that episode
   dat_path: "data/processed_wac_100m_new/sigma/100/new_test_set_wide/craters.dat"
   metadata_csv: "data/processed_wac_100m_new/sigma/100/new_test_set_wide/metadata.csv"
-  split_csv: "configs/new_test_set_split.csv"
+  split_csv: "configs/liorr_labels_split.csv"   # baseline split: old halves kept, new
+                                                  # labels split 50/50 (eval/new_test_set_split.py --extend)
   class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+  # Teacher-style augmented views of every labelled crater (context + zoom,
+  # blur/solarize/jitter/flips + rot90 - src/train/labeled_views.py) and
+  # class-balanced episodes. Images stored at store_size so the 1xD zoom is
+  # a native crop. false = the old fixed, unaugmented rendering.
+  augment: true
+  store_size: 448
+  n_query_per_class: 32
   crop_size: 224              # matches crops.global_crops_size - same input convention
                                 # the rest of this run's images go through
+  seed: 0
+
+# Ordinal supervised-contrastive auxiliary loss (src/train/supcon_loss.py) -
+# OFF by default, so every existing run is unchanged. Enable with
+# OBJECTIVE=supcon in slurm/train_dino_finetune_kaguya.sbatch (which also
+# turns proto off). Same train_pool-only data as proto: on a catalog,
+# train_dino.py points catalog/split_csv at <catalog>/testset and
+# configs/liorr_labels_split.csv. final_test is never touched.
+supcon:
+  enabled: false
+  loss_weight: 0.2
+  tau: 0.1                  # contrastive temperature
+  ordinal_sigma: 0.75       # class-distance kernel: 1 / 0.41 / 0.03 / ~0 for 0/1/2/3 steps; 0 = plain SupCon
+  per_class: 16             # class-balanced: 16 craters per class per step, 2 views each = 128 images
+  teacher_views: true       # the teacher's context+zoom global views (+rot90), stored at store_size
+  store_size: 448
+  zoom_min: 0.5             # (teacher_views: false only) random centred zoom between the 2xD context and the 1xD crater
+  jitter: 0.15              # contrast/brightness jitter (normalized units)
+  class_names: ["v-fr", "r-fr", "r-dr", "v-dr"]
+  crop_size: 224
+  catalog: null
+  split_csv: "configs/liorr_labels_split.csv"
   seed: 0

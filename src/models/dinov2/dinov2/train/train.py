@@ -182,6 +182,9 @@ def do_train(cfg, model, resume=False):
             global_crops_size=cfg.crops.global_crops_size,
             local_crops_size=cfg.crops.local_crops_size,
             in_chans=cfg.student.in_chans,
+            global_crops_mode=cfg.crops.get("global_crops_mode", "random"),
+            image_fov_diameters=cfg.crops.get("image_fov_diameters", 2.0),
+            zoom_diameters=cfg.crops.get("zoom_diameters", 1.0),
         )
     elif cfg.train.cell_augmentation:
         data_transform = CellAugmentationDINO(

@@ -640,7 +640,7 @@ if __name__ == '__main__':
     parser.add_argument('--proto_metadata_csv', type=str,
                         default="data/processed_wac_100m_new/sigma/100/new_test_set/metadata.csv")
     parser.add_argument('--proto_split_csv', type=str,
-                        default="configs/new_test_set_split.csv")
+                        default="configs/liorr_labels_split.csv")
     parser.add_argument('--proto_class_names', type=str,
                         default="v-fr,r-fr,r-dr,v-dr",
                         help="Comma-separated, ordinal order (index 0 = freshest)")

@@ -85,6 +85,24 @@ def sample_episode(pool_x: torch.Tensor, pool_y: np.ndarray, n_classes: int,
     return pool_x[support_idx], support_y_t, pool_x[query_idx], query_y_t
 
 
+def sample_balanced_episode_idx(pool_y: np.ndarray, n_classes: int, n_support: int,
+                                n_query: int, rng: np.random.RandomState):
+    """Class-balanced episode: per class n_support support and n_query query
+    craters, disjoint where the class is big enough (the query is drawn with
+    replacement only for a class too small for both, e.g. v-fr's 27). Returns
+    (support_idx, query_idx) into the pool. Balanced queries stop the loss
+    being dominated by v-dr, which is ~60% of the labelled pool."""
+    s_idx, q_idx = [], []
+    for c in range(n_classes):
+        ix = np.flatnonzero(pool_y == c)
+        rng.shuffle(ix)
+        n_sup = min(n_support, max(len(ix) - 1, 1))
+        rest = ix[n_sup:]
+        s_idx.extend(ix[:n_sup].tolist())
+        q_idx.extend(rng.choice(rest, n_query, replace=len(rest) < n_query).tolist())
+    return np.array(s_idx), np.array(q_idx)
+
+
 class LabeledEpisodePool:
     """Loads configs/new_test_set_split.csv's train_pool craters (from the
     wide-FOV new_test_set variant - see Snakefile's preprocess_new_test_set
@@ -97,32 +115,51 @@ class LabeledEpisodePool:
     images framed the same way the self-distillation objective's global
     crops do, not a mismatched preprocessing path."""
 
-    def __init__(self, dat_path: str, metadata_csv: str, split_csv: str,
+    def __init__(self, dat_path: str | None, metadata_csv: str | None, split_csv: str,
                 class_names: list[str], crop_size: int = 224, in_chans: int = 3,
-                device: str = "cuda"):
-        split = pd.read_csv(split_csv)
+                device: str = "cuda", catalog: str | None = None):
+        """Either dat_path + metadata_csv (a preprocess_2.py labeled .dat),
+        or catalog = a build_catalog.py directory (normally <catalog>/testset,
+        whose loader.json takes its constants from the parent - so episodes
+        are normalized exactly like the self-distillation images)."""
+        split = pd.read_csv(split_csv, dtype={"crater_id": str})
         pool_ids = set(split.loc[split["split"] == "train_pool", "crater_id"])
-
-        meta = pd.read_csv(metadata_csv)
         class_to_idx = {name: i for i, name in enumerate(class_names)}
         labels_by_id = dict(zip(split["crater_id"], split["degree"].map(class_to_idx)))
 
-        row_idx = [i for i, crater_id in enumerate(meta["id"]) if crater_id in pool_ids]
-        if not row_idx:
-            raise ValueError(f"no train_pool craters found in {metadata_csv} - "
-                            f"does it match {split_csv}'s crater_id set?")
-
-        data = load_holdout_dat(dat_path)
-        imgs = torch.from_numpy(np.asarray(data[row_idx])).float()  # (N, 1, 128, 128), already [0,1]
-        imgs = F.interpolate(imgs, size=(crop_size, crop_size), mode="bilinear", align_corners=False)
+        if catalog is not None:
+            from src.data.crater_catalog_dataset import CraterCatalog
+            ds = CraterCatalog(root=catalog)
+            ids = ds.index["crater_id"].astype(str).tolist()
+            row_idx = [i for i, cid in enumerate(ids) if cid in pool_ids]
+            if not row_idx:
+                raise ValueError(f"no train_pool craters of {split_csv} in catalog {catalog}")
+            # native crops are ragged: resize each (antialiased) to crop_size
+            imgs = torch.cat([F.interpolate(ds.get_image_data(i)[None].float(),
+                                            size=(crop_size, crop_size), mode="bilinear",
+                                            align_corners=False, antialias=True)
+                              for i in row_idx])
+            pool_y_ids = [ids[i] for i in row_idx]
+            src = catalog
+        else:
+            meta = pd.read_csv(metadata_csv, dtype={"id": str})
+            row_idx = [i for i, crater_id in enumerate(meta["id"]) if crater_id in pool_ids]
+            if not row_idx:
+                raise ValueError(f"no train_pool craters found in {metadata_csv} - "
+                                f"does it match {split_csv}'s crater_id set?")
+            data = load_holdout_dat(dat_path)
+            imgs = torch.from_numpy(np.asarray(data[row_idx])).float()  # (N, 1, 128, 128), already [0,1]
+            imgs = F.interpolate(imgs, size=(crop_size, crop_size), mode="bilinear", align_corners=False)
+            pool_y_ids = [meta["id"].iloc[i] for i in row_idx]
+            src = dat_path
         if in_chans > 1 and imgs.shape[1] == 1:
             imgs = imgs.repeat(1, in_chans, 1, 1)
         self.pool_x = imgs.to(device)
-        self.pool_y = np.array([labels_by_id[meta["id"].iloc[i]] for i in row_idx])
+        self.pool_y = np.array([labels_by_id[cid] for cid in pool_y_ids])
         self.n_classes = len(class_names)
 
         counts = {class_names[c]: int((self.pool_y == c).sum()) for c in range(self.n_classes)}
-        print(f"LabeledEpisodePool: {len(row_idx)} train_pool craters loaded from {dat_path}, "
+        print(f"LabeledEpisodePool: {len(row_idx)} train_pool craters loaded from {src}, "
              f"per-class counts: {counts}")
 
     def sample(self, n_support_per_class: int, rng: np.random.RandomState):

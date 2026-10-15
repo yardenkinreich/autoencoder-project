@@ -75,7 +75,25 @@ def _detect_dino_arch(checkpoint_path: str, checkpoint_key: str = "teacher") -> 
     checkpoint-specific shape drift (see cluster.py). Returns {} (no
     override, DINO_VIT_KWARGS wins) if the checkpoint has no patch_embed key
     at all - lets the load below raise its own clear error rather than
-    silently guessing."""
+    silently guessing.
+
+    ALSO auto-detects block_chunks and init_values from the checkpoint's own
+    keys - this used NOT to happen, and it was a real, severe bug: neither
+    DINO_VIT_KWARGS nor this function's patch/img_size detection ever
+    touched either, so vit_small() silently fell back to
+    DinoVisionTransformer's own class defaults (block_chunks=1, chunked
+    "blocks.<chunk>.<i>.*" naming; init_values=None, no LayerScale module at
+    all) for EVERY finetuned/DIET-CP checkpoint - all of which were actually
+    saved with block_chunks=0 (flat "blocks.<i>.*" naming) and init_values=
+    1.0 (real ls1.gamma/ls2.gamma weights). Because load_pretrained_weights()
+    loads with strict=False, that key-name/structure mismatch never raised -
+    it silently left 144/151 backbone parameters (every transformer block)
+    at their RANDOM INITIALIZATION value, loading only patch_embed/cls_token/
+    pos_embed correctly. Confirmed directly against real checkpoints from
+    both diet_cp.py and train_dino.py (see the session's own verification
+    scripts) before landing this fix - every "dino"-family checkpoint ever
+    evaluated through load_dino_backbone() before this fix was evaluated
+    with an almost entirely untrained backbone."""
     raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     sd = raw[checkpoint_key] if checkpoint_key is not None and checkpoint_key in raw else raw
     sd = {k.replace("module.", "").replace("backbone.", ""): v for k, v in sd.items()}
@@ -86,6 +104,39 @@ def _detect_dino_arch(checkpoint_path: str, checkpoint_key: str = "teacher") -> 
     detected = {"patch_size": int(patch_size), "in_chans": int(in_chans)}
     if int(patch_size) in _DINO_IMG_SIZE_BY_PATCH_SIZE:
         detected["img_size"] = _DINO_IMG_SIZE_BY_PATCH_SIZE[int(patch_size)]
+    # block_chunks: flat "blocks.0.*" (block_chunks=0) vs chunked
+    # "blocks.0.0.*" (block_chunks>=1 - this project only ever produces
+    # exactly 1 chunk, so 1 is the only value that needs detecting).
+    if "blocks.0.0.norm1.weight" in sd:
+        detected["block_chunks"] = 1
+    elif "blocks.0.norm1.weight" in sd:
+        detected["block_chunks"] = 0
+    # init_values: LayerScale's gamma is only present as a real parameter
+    # when the model was built with init_values not None/0 - its exact
+    # magnitude doesn't matter for loading (the checkpoint's own gamma
+    # values load over whatever this is initialized to), 1.0 just needs to
+    # be non-None/non-0 so vit_small() actually creates the ls1/ls2 module
+    # instead of nn.Identity().
+    if "blocks.0.0.ls1.gamma" in sd or "blocks.0.ls1.gamma" in sd:
+        detected["init_values"] = 1.0
+    # ffn_layer: "mlp" builds mlp.fc1/mlp.fc2 (Mlp, mlp.py); "swiglu"/
+    # "swiglufused" builds mlp.w12/mlp.w3 (SwiGLUFFN*, swiglu_ffn.py) -
+    # entirely different parameter names, same silent-drop mechanism as
+    # block_chunks/init_values above (an entire block's FFN half left at
+    # random init instead of raising). Not currently reachable by any
+    # checkpoint this project produces (no config overrides ffn_layer away
+    # from the "mlp" default both DINO_VIT_KWARGS and vit_small() already
+    # assume) - detected anyway so a future config change can't silently
+    # reintroduce this bug's exact failure mode on a different kwarg.
+    if "blocks.0.0.mlp.w12.weight" in sd or "blocks.0.mlp.w12.weight" in sd:
+        detected["ffn_layer"] = "swiglu"
+    elif "blocks.0.0.mlp.fc1.weight" in sd or "blocks.0.mlp.fc1.weight" in sd:
+        detected["ffn_layer"] = "mlp"
+    # num_register_tokens: register_tokens only exists as a parameter when
+    # >0 - smaller blast radius than the above (one tensor), same
+    # mechanism. Not currently reachable either (default is 0 everywhere).
+    if "register_tokens" in sd:
+        detected["num_register_tokens"] = int(sd["register_tokens"].shape[1])
     return detected
 
 

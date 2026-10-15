@@ -31,6 +31,8 @@ import torch
 from src.models.dinov2.dinov2.utils.config import setup
 from src.models.dinov2.dinov2.train.ssl_meta_arch import SSLMetaArch
 from src.models.dinov2.dinov2.train.train import do_train, do_test
+from src.data.dino_craters_augmentation import recipe_version
+from src.eval.attention_maps import _flat_blocks
 
 
 def _write_run_manifest(cfg, args):
@@ -49,6 +51,8 @@ def _write_run_manifest(cfg, args):
     # re-parsing config.yaml.
     proto_cfg = cfg.get("proto", None)
     proto_enabled = bool(proto_cfg) and proto_cfg.get("enabled", False)
+    supcon_cfg = cfg.get("supcon", None)
+    supcon_enabled = bool(supcon_cfg) and supcon_cfg.get("enabled", False)
     manifest = {
         "schema_version": 1,
         "family": "dino",
@@ -77,11 +81,33 @@ def _write_run_manifest(cfg, args):
         # predate this field, a freshly-written manifest can just state it
         # directly, whether this is the finetune config or the from-scratch
         # one (both always use the same wide-FOV data convention).
-        "fov": 1.0,
+        "fov": float(cfg.crops.get("image_fov_diameters", 2.0)) - 1.0,
+        "dataset": args.input,
+        "dataset_type": getattr(args, "dataset_type", "dat"),
         "proto_loss_enabled": proto_enabled,
+        "dino_objective": "+".join(["ssl"] + (["proto"] if proto_enabled else [])
+                                   + (["supcon"] if supcon_enabled else [])),
+        "supcon_loss_enabled": supcon_enabled,
+        "supcon": ({k: supcon_cfg.get(k) for k in ("loss_weight", "tau", "ordinal_sigma",
+                                                    "per_class", "zoom_min", "jitter", "split_csv")}
+                   if supcon_enabled else None),
+        "koleo_loss_weight": float(cfg.dino.get("koleo_loss_weight", 0.0)),
+        "proto_source": ((proto_cfg.get("catalog") or proto_cfg.get("dat_path"))
+                         if proto_enabled else None),
         "proto_loss_weight": proto_cfg.get("loss_weight") if proto_enabled else None,
         "proto_n_support_per_class": proto_cfg.get("n_support_per_class") if proto_enabled else None,
         "proto_split_csv": proto_cfg.get("split_csv") if proto_enabled else None,
+        # Which CraterAugmentationDINO recipe produced this run - there's no
+        # config toggle for old-vs-new (the augmentation fix lives in code,
+        # not a YAML flag - see dino_craters_augmentation.py's own comment),
+        # so this durable marker is what actually lets a future comparison
+        # tell which recipe a checkpoint came from, independent of directory
+        # naming.
+        "augmentation_recipe": recipe_version(cfg.crops.get("global_crops_mode", "random")),
+        "global_crops_mode": cfg.crops.get("global_crops_mode", "random"),
+        "zoom_diameters": (cfg.crops.get("zoom_diameters", 1.0)
+                           if cfg.crops.get("global_crops_mode", "random") == "context_zoom" else None),
+        "freeze_backbone_except_last_n_blocks": args.freeze_backbone_except_last_n_blocks,
         "param_source": "run_manifest",
         "checkpoint_path": os.path.join(args.output_dir, "eval", "final", "teacher_checkpoint.pth"),
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -180,9 +206,57 @@ def plot_dino_loss(output_dir: str) -> dict:
     return {"total": total_path, "components": component_paths}
 
 
+def resolve_dataset(path: str):
+    """--input -> (dataset_str for DINOv2's loader, kind, image width in
+    crater diameters).
+
+    Two data sources:
+      dat      a preprocess_2.py craters_*.dat memmap (WAC dino_wide): fixed
+               128 px, already [0,1]-scaled, offset 1.0 -> 2 diameters wide.
+      catalog  a src/data/build_catalog.py directory (index.csv + crops.f32,
+               e.g. data/catalogs/kaguya_tco_ratio): native, ragged crops
+               read through CraterCatalog, normalized by the catalog's own
+               loader.json; image width = 1 + the manifest's fov_offset.
+    A catalog may be given as the directory or as its index.csv.
+    """
+    p = path.rstrip("/")
+    if os.path.basename(p) == "index.csv":
+        p = os.path.dirname(p)
+    if os.path.isdir(p) and os.path.exists(os.path.join(p, "index.csv")):
+        if not os.path.exists(os.path.join(p, "loader.json")):
+            raise FileNotFoundError(
+                f"{p} has no loader.json - CraterCatalog will not guess a "
+                f"normalization. Run slurm/catalog_postprocess.sbatch on it first "
+                f"(CATALOG_LIST=\"{os.path.basename(p)}\" SKIP_COMPARE=1).")
+        man = json.load(open(os.path.join(p, "catalog_manifest.json")))
+        return f"CraterCatalog:root={p}", "catalog", 1.0 + float(man["fov_offset"])
+    return f"Craters:root={path}", "dat", 2.0
+
+
 def main(args):
-    opts = list(args.opts)
-    opts.append(f"train.dataset_path=Craters:root={args.input}")
+    dataset_str, args.dataset_type, fov_diameters = resolve_dataset(args.input)
+    print(f"dataset: {args.dataset_type} -> {dataset_str} "
+          f"(images {fov_diameters:g} crater diameters wide)")
+    # Data-derived settings go FIRST so an explicit --opts still wins.
+    opts = [f"crops.image_fov_diameters={fov_diameters}"]
+    if args.dataset_type == "catalog":
+        # Episodes must come from the SAME kind of images the model
+        # self-distills on: the catalog's own labeled testset (normalized
+        # with the parent's constants by its loader.json), split by the
+        # baseline label split. Overridable with --proto_catalog /
+        # --proto_split_csv or --opts.
+        cat = args.input.rstrip("/")
+        cat = os.path.dirname(cat) if os.path.basename(cat) == "index.csv" else cat
+        opts += [f"proto.catalog={args.proto_catalog or os.path.join(cat, 'testset')}",
+                 f"proto.split_csv={args.proto_split_csv}",
+                 f"supcon.catalog={args.proto_catalog or os.path.join(cat, 'testset')}",
+                 f"supcon.split_csv={args.proto_split_csv}"]
+    elif args.proto_catalog:
+        opts += [f"proto.catalog={args.proto_catalog}", f"proto.split_csv={args.proto_split_csv}"]
+    opts += list(args.opts)
+    if args.no_proto:
+        opts.append("proto.enabled=false")
+    opts.append(f"train.dataset_path={dataset_str}")
     if args.epochs is not None:
         opts.append(f"optim.epochs={args.epochs}")
     if args.batch_size is not None:
@@ -198,7 +272,49 @@ def main(args):
     )
     cfg = setup(setup_args)
 
+    # The prototypical pool must show the model the SAME kind of images it
+    # self-distills on. A WAC .dat pool next to a Kaguya catalog would put
+    # 100 m/px episodes beside 8.4 m/px training views.
+    proto_cfg = cfg.get("proto", None)
+    if (args.dataset_type == "catalog" and proto_cfg and proto_cfg.get("enabled", False)
+            and not proto_cfg.get("catalog", None)):
+        raise ValueError(
+            "training on a catalog but proto: still points at a .dat pool "
+            f"({proto_cfg.get('dat_path')}). Set proto.catalog=<catalog>/testset (and a "
+            "proto.split_csv covering its labels), or proto.enabled=false.")
+
+    supcon_cfg = cfg.get("supcon", None)
+    if supcon_cfg and supcon_cfg.get("enabled", False) and not supcon_cfg.get("catalog", None):
+        raise ValueError("supcon.enabled but no supcon.catalog - SupCon draws labelled "
+                         "craters from a build_catalog testset (train with a catalog --input)")
+
     model = SSLMetaArch(cfg).to(torch.device("cuda"))
+
+    if args.freeze_backbone_except_last_n_blocks is not None:
+        # Freeze the STUDENT backbone (the only one gradients ever flow
+        # into - the teacher is EMA-updated, never optimized directly, see
+        # ssl_meta_arch.py) down to just its last N transformer blocks,
+        # mirroring diet_cp.py's --unfreeze_last_n_blocks. Must happen
+        # BEFORE prepare_for_distributed_training() (FSDP wrapping) - not
+        # after, since freezing under FSDP needs the pre-wrap module tree.
+        # get_params_groups_with_decay() (dinov2/utils/param_groups.py)
+        # already skips any parameter with requires_grad=False, so this is
+        # the only change needed - do_train()'s own optimizer construction
+        # picks it up automatically, nothing else to touch.
+        blocks = _flat_blocks(model.student.backbone)
+        n = args.freeze_backbone_except_last_n_blocks
+        frozen_blocks = blocks if n == 0 else blocks[:-n]
+        for p in model.student.backbone.parameters():
+            p.requires_grad = False
+        for blk in (blocks[-n:] if n > 0 else []):
+            for p in blk.parameters():
+                p.requires_grad = True
+        n_frozen_params = sum(p.numel() for blk in frozen_blocks for p in blk.parameters())
+        n_total_params = sum(p.numel() for p in model.student.backbone.parameters())
+        print(f"Froze student backbone except last {n} block(s): "
+             f"{n_frozen_params}/{n_total_params} backbone params frozen "
+             f"({len(frozen_blocks)}/{len(blocks)} blocks)")
+
     model.prepare_for_distributed_training()
 
     do_train(cfg, model, resume=not args.no_resume)
@@ -217,8 +333,11 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DINOv2 self-supervised pretraining on crater crops")
     parser.add_argument("--input",       required=True,
-                        help="Path to the DINO-specific craters_*.dat memmap "
-                             "(wide-FOV, single-branch — see preprocess_2.py --clean_offset)")
+                        help="Either the DINO-specific craters_*.dat memmap (wide-FOV, "
+                             "single-branch - see preprocess_2.py --clean_offset), or a "
+                             "build_catalog.py catalog directory / its index.csv (e.g. "
+                             "data/catalogs/kaguya_tco_ratio). Detected automatically; "
+                             "see resolve_dataset().")
     parser.add_argument("--output_dir",  required=True,
                         help="Where checkpoints, tensorboard/, and training_metrics.json go")
     parser.add_argument("--config_file", default="configs/dino_craters.yaml")
@@ -234,6 +353,15 @@ if __name__ == "__main__":
                              "student.pretrained_weights from the config file. Architecture "
                              "(patch_size/in_chans/arch) must match the checkpoint or "
                              "load_state_dict will raise on shape mismatch.")
+    parser.add_argument("--no_proto", action="store_true",
+                        help="Self-distillation only: disable the config's prototypical "
+                             "loss (proto.enabled=false). Recorded as dino_objective=ssl.")
+    parser.add_argument("--proto_catalog", default=None,
+                        help="Catalog directory the prototypical episodes come from. "
+                             "Default for catalog training: <--input>/testset.")
+    parser.add_argument("--proto_split_csv", default="configs/liorr_labels_split.csv",
+                        help="train_pool/final_test split for the episodes (catalog "
+                             "training). Only train_pool craters are ever used.")
     parser.add_argument("--opts", nargs="*", default=[],
                         help="Extra Yacs-style overrides, e.g. dino.head_n_prototypes=2048")
     parser.add_argument("--min_diameter", type=float, default=None,
@@ -243,5 +371,12 @@ if __name__ == "__main__":
     parser.add_argument("--data_tag",     type=str,   default=None,
                         help="For run_manifest.json only - short label for "
                              "--input's data source")
+    parser.add_argument("--freeze_backbone_except_last_n_blocks", type=int, default=None,
+                        help="Freeze the student backbone down to just its last N "
+                             "transformer blocks (0 freezes everything). Default "
+                             "(None) leaves the whole backbone trainable, unchanged "
+                             "from every prior run. Mirrors diet_cp.py's "
+                             "--unfreeze_last_n_blocks - see main()'s comment for why "
+                             "this has to happen before FSDP wrapping.")
     args = parser.parse_args()
     main(args)

@@ -135,13 +135,21 @@ def cv_knn_eval(latents: np.ndarray, df: pd.DataFrame, n_classes: int,
     rows = []
     for train_idx, test_idx in skf.split(latents, y):
         k_fold = min(k, len(train_idx))
-        # n_jobs=1: seen a garbage-index IndexError out of predict_proba's
-        # compiled backend on new_set_final_test (321 samples, under a
-        # multi-CPU SLURM allocation) - a classic symptom of a joblib/BLAS
+        # algorithm="brute", n_jobs=1: predict_proba's compiled backend has
+        # twice produced a garbage-index IndexError here ("index
+        # 4857970495269232650 is out of bounds for axis 0 with size 513") - a
         # threading race in sklearn's KDTree/BallTree query, not a logic bug
-        # here (min_class_count/folds/k_fold bookkeeping above all check
-        # out). Single-threaded CV over a few hundred samples costs nothing.
-        knn = KNeighborsClassifier(n_neighbors=k_fold, n_jobs=1).fit(latents[train_idx], y[train_idx])
+        # (min_class_count/folds/k_fold bookkeeping all check out, and the
+        # latents were verified finite with unit L2 norm when it recurred).
+        #
+        # n_jobs=1 alone did NOT fix it; the race lives below joblib in the
+        # tree backend. So bypass the trees entirely. That costs nothing and
+        # is arguably more correct anyway: these embeddings are ~384-dim, and
+        # spatial trees give no speedup above ~15 dimensions - a brute-force
+        # exact search over a few hundred samples is both faster here and free
+        # of the code path that misbehaves.
+        knn = KNeighborsClassifier(n_neighbors=k_fold, n_jobs=1,
+                                   algorithm="brute").fit(latents[train_idx], y[train_idx])
         preds = knn.predict(latents[test_idx])
         for i, idx in enumerate(test_idx):
             rows.append({

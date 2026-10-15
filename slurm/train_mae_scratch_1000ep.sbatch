@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=mae-scratch-1000ep
 #SBATCH --partition=normal
-#SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:h200:2
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=72:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output=logs/slurm-%x-%j.out
 
 # Plain (no proto loss) MAE from-scratch baseline at a much longer budget
@@ -22,6 +22,15 @@
 #
 # Resumable: re-submitting this script after a timeout/interruption picks up
 # from checkpoint_last.pth automatically (checkpoint_every=20, the default).
+#
+# 2 GPUs via torchrun/DDP - confirmed with a real diagnostic (nvidia-smi
+# during a live run) that a single H200 was already at 96-100% utilization
+# at every batch size tried, i.e. genuinely compute-bound, not just
+# under-batched - so more GPUs (each processing its own shard of the epoch
+# in parallel, via DistributedSampler) directly cuts wall time, unlike a
+# bigger batch size on one GPU which measurably didn't. --batch_size below
+# is PER GPU (matches the Snakefile's own multi-GPU TRAIN_LAUNCHER
+# convention), so total effective batch size is 256, not 128.
 
 set -uo pipefail
 cd "$SLURM_SUBMIT_DIR"
@@ -39,7 +48,7 @@ if [ -f "$OUTPUT_DIR/models/checkpoint_last.pth" ]; then
     RESUME_ARGS=(--resume "$OUTPUT_DIR/models/checkpoint_last.pth")
 fi
 
-PYTHONPATH=$(pwd) python src/train/train.py \
+PYTHONPATH=$(pwd) torchrun --standalone --nproc_per_node=2 src/train/train.py \
   --autoencoder_model mae \
   --input data/processed_wac_100m_new/sigma/100/test_rotate/without_left_band/craters_aug.dat \
   --model_output "$OUTPUT_DIR/models/autoencoder.pth" \

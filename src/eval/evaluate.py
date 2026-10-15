@@ -207,6 +207,17 @@ def evaluate_labeled_set(name: str, spec: dict, checkpoint: str,
     # (julie, new_set, new_set_final_test, ...) gets these automatically, for
     # every checkpoint ever evaluated, not just DINO - k values skipped if
     # this set doesn't have enough craters for them.
+    # unsupervised_crop_zoom: per-set override for plot_unsupervised_cluster_
+    # images' thumbnail size (see eval_suite.yaml's labeled_sets.julie entry)
+    # - the same zoom value doesn't read the same across sets: point-cloud
+    # spread differs per set/technique, so a fixed zoom that's crowded on a
+    # bigger set (e.g. new_set_final_test, 321 craters) can look too small
+    # on a smaller one (julie, 150). Falls back to plot_unsupervised_cluster_
+    # images' own default when not set.
+    crop_zoom_kwargs = {}
+    if spec.get("unsupervised_crop_zoom") is not None:
+        crop_zoom_kwargs["zoom"] = spec["unsupervised_crop_zoom"]
+
     for target_k in (10, 50):
         if target_k >= len(df):
             continue
@@ -218,7 +229,26 @@ def evaluate_labeled_set(name: str, spec: dict, checkpoint: str,
             V.plot_unsupervised_cluster_images(
                 latents, cluster_labels, df, imgs_dir,
                 os.path.join(out_dir, f"unsupervised_k{target_k}_{technique}_images.png"),
-                technique=technique, model_name=autoencoder_model)
+                technique=technique, model_name=autoencoder_model, **crop_zoom_kwargs)
+
+    # Attention-map diagnostic (the Mars CTX foundation-model paper's check -
+    # see eval/attention_maps.py's module docstring): does the last block's
+    # CLS attention stay concentrated on the crater itself, or scatter/track
+    # a nuisance feature like raw brightness? DINO-family only - not
+    # meaningful for MAE/CAE's different architecture, and untested there.
+    # Loads its OWN model instance (embed()/embed_holdout() don't expose the
+    # one they already built) - an extra checkpoint load, cheap next to
+    # everything else this function already does.
+    if autoencoder_model in ("dino", "dino_pretrained"):
+        import torch
+        from eval import attention_maps as AM
+        from models.dino_backbone import load_dino_backbone, load_stock_pretrained_dino
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        attn_model = (load_stock_pretrained_dino(checkpoint, device=device)
+                     if autoencoder_model == "dino_pretrained"
+                     else load_dino_backbone(checkpoint, device=device))
+        AM.save_attention_maps_for_df(attn_model, df, imgs_dir,
+                                      os.path.join(out_dir, "attention_maps"))
 
     _write_labeled_report(out_dir, results, cm, pc, scheme, cal)
 
@@ -293,14 +323,27 @@ def main():
     from dashboard import model_meta as MM  # deferred - see run_layout.py's own
                                              # same-shaped import for why (avoids a
                                              # module-load-time eval/->dashboard/ dep)
-    if MM.extract_model_params(args.checkpoint, args.autoencoder_model).get("proto_loss_enabled"):
+    def _used_label_pool(ckpt, arch) -> bool:
+        """proto OR supcon training saw the split's train_pool labels."""
+        if MM.extract_model_params(ckpt, arch).get("proto_loss_enabled"):
+            return True
+        from run_layout import find_training_run_dir
+        rd = find_training_run_dir(ckpt)
+        mf = os.path.join(rd, "run_manifest.json") if rd else None
+        return bool(mf and os.path.exists(mf) and json.load(open(mf)).get("supcon_loss_enabled"))
+
+    if _used_label_pool(args.checkpoint, args.autoencoder_model):
         # This checkpoint's finetune used new_test_set_split.csv's "train_pool"
         # half as direct training supervision (src/train/prototypical_loss.py) -
         # scoring it against the FULL new_set would silently include those
         # craters in a number presented as "held-out". Only run sets that stay
         # leak-safe for this checkpoint (new_set_final_test, julie, ...).
-        skipped = [n for n in labeled_sets if n == "new_set"]
-        labeled_sets = {n: s for n, s in labeled_sets.items() if n != "new_set"}
+        # any FULL labeled set holds the train_pool craters the proto loss
+        # trained on - "new_set" by name (legacy), others flagged in the config
+        leaky = {n for n, s in labeled_sets.items()
+                 if n == "new_set" or (s or {}).get("leaks_proto_train_pool")}
+        skipped = sorted(leaky)
+        labeled_sets = {n: s for n, s in labeled_sets.items() if n not in leaky}
         if skipped:
             print(f"proto_loss_enabled=true for this checkpoint - skipping {skipped} "
                  f"(leaks train_pool craters; use new_set_final_test instead)")

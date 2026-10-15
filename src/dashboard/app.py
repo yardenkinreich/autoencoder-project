@@ -33,7 +33,12 @@ history_df = D.load_history()
 run_dirs = D.list_run_dirs()
 
 col1, col2 = st.columns(2)
-col1.metric("Runs in eval_history.csv", len(history_df))
+# Unique checkpoints, not raw eval_history.csv rows - a checkpoint
+# re-evaluated multiple times (e.g. after a bug fix) is one MODEL, not
+# several - matches Compare Runs' own drop_duplicates("checkpoint",
+# keep="last") convention and history.best_runs()'s dedup.
+n_checkpoints = history_df["checkpoint"].nunique() if not history_df.empty else 0
+col1.metric("Models evaluated (unique checkpoints)", n_checkpoints)
 col2.metric("Eval run directories on disk (logs/**/eval_results/)", len(run_dirs))
 
 if history_df.empty and not run_dirs:

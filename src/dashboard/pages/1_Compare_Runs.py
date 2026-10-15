@@ -330,10 +330,28 @@ with compare_tab:
                     plot_choices[f"Unsupervised clusters k={k} ({tech.upper()})"] = ("unsup", k, tech, "dots")
                     plot_choices[f"Unsupervised clusters k={k} ({tech.upper()}), crops"] = ("unsup", k, tech, "images")
 
+        # Geographic / cluster-profile figures. Keyed by a ("geo", kind, k)
+        # tuple, resolved per run at lookup time below.
+        #
+        # These belong HERE rather than only in Run Deep Dive because they
+        # answer a different-models question: "did finetuning make the
+        # longitude artifact better or worse?" is a comparison ACROSS
+        # checkpoints, which is what this page is for. Deep Dive's version of
+        # the same artifacts compares one checkpoint across data variants.
+        #
+        # k is offered rather than fixed because the artifact reads very
+        # differently at k=4 (broad terrain split) and k=100 (fine structure).
+        for gk in (4, 10, 100):
+            plot_choices[f"Geographic map k={gk}"] = ("geo", "png", gk)
+            plot_choices[f"Average crater per cluster k={gk}"] = ("geo", "mean_craters_png", gk)
+            plot_choices[f"Cluster feature profile k={gk}"] = ("geo", "feature_profile_png", gk)
+
         vc1, vc2, vc3 = st.columns(3)
         vplot_label = vc1.selectbox("Plot", list(plot_choices.keys()))
         vplot_key = plot_choices[vplot_label]
-        vset = vc2.selectbox("Labeled set", labeled_set_names) if vplot_key != "loss_curve" else None
+        _needs_set = (vplot_key != "loss_curve"
+                      and not (isinstance(vplot_key, tuple) and vplot_key[0] == "geo"))
+        vset = vc2.selectbox("Labeled set", labeled_set_names) if _needs_set else None
         gallery_cols = vc3.radio("Columns", [2, 3, 4], index=1, horizontal=True)
 
         runs_to_show = ordered
@@ -352,12 +370,30 @@ with compare_tab:
             else:
                 img_cols = st.columns(min(gallery_cols, len(gallery_df)))
                 any_shown = False
+                geo_variant_by_run: dict = {}
                 for i, (_, r) in enumerate(gallery_df.iterrows()):
                     col = img_cols[i % len(img_cols)]
                     path = None
                     if vplot_key == "loss_curve":
                         if pd.notna(r.get("training_run_dir")):
                             path = D.training_artifacts(r["training_run_dir"])["loss_curve_png"]
+                    elif isinstance(vplot_key, tuple) and vplot_key[0] == "geo":
+                        # Geographic artifacts hang off the CHECKPOINT's run
+                        # dir, not off a labeled set, so they bypass
+                        # load_labeled_set_artifacts entirely. A checkpoint
+                        # with several data variants resolves to the first
+                        # non-legacy one, since a legacy preprocess_2 map
+                        # excludes a 90 degree longitude band and would be
+                        # silently incomparable with a full-longitude map.
+                        _, kind, gk = vplot_key
+                        variants = D.all_geographic_variants(r.get("run_dir"))
+                        pick = next((v for v in sorted(variants)
+                                     if not variants[v].get("legacy")), None)
+                        if pick is None:
+                            pick = next(iter(sorted(variants)), None)
+                        if pick is not None:
+                            path = (variants[pick]["by_k"].get(gk) or {}).get(kind)
+                            geo_variant_by_run[r["run_id"]] = pick
                     elif pd.notna(r.get("run_dir")):
                         ea = D.load_labeled_set_artifacts(r["run_dir"], vset)
                         if isinstance(vplot_key, tuple) and vplot_key[0] == "unsup":
@@ -369,6 +405,14 @@ with compare_tab:
                     caption = r["run_label"]
                     if pd.notna(metric_val):
                         caption = f"{r['run_label']}  ({label_map.get(primary_metric, primary_metric)}: {metric_val:.3f})"
+                    # Name the data variant each run resolved to. Two runs can
+                    # land on different variants - and a legacy map excludes a
+                    # 90 degree longitude band while a catalog map does not, so
+                    # an unlabelled side-by-side would invite a comparison that
+                    # is not like-for-like.
+                    gvar = geo_variant_by_run.get(r["run_id"])
+                    if gvar:
+                        caption = f"{caption}\n[{gvar}]"
                     if path:
                         col.image(path, caption=caption, width='stretch')
                         any_shown = True
@@ -376,6 +420,14 @@ with compare_tab:
                         col.caption(f"{r['run_label']}: not available")
                 if not any_shown:
                     st.info("None of the selected runs have this plot available.")
+                if len(set(geo_variant_by_run.values())) > 1:
+                    st.warning(
+                        "**These runs resolved to different data variants** (shown in "
+                        "each caption). A `legacy (preprocess_2 …)` map excludes a 90° "
+                        "longitude band that the catalog-derived maps keep, and cluster "
+                        "colours never correspond across variants or models — so read "
+                        "these for whether spatial structure exists and its shape, not "
+                        "colour to colour or gap to gap.")
 
 # ============================================================================
 # Leaderboard tab

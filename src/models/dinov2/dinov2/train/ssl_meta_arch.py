@@ -118,12 +118,53 @@ class SSLMetaArch(nn.Module):
             self.proto_loss_weight = proto_cfg.loss_weight
             self.proto_n_support = proto_cfg.n_support_per_class
             self.proto_pool = LabeledEpisodePool(
-                dat_path=proto_cfg.dat_path, metadata_csv=proto_cfg.metadata_csv,
+                dat_path=proto_cfg.get("dat_path", None),
+                metadata_csv=proto_cfg.get("metadata_csv", None),
+                catalog=proto_cfg.get("catalog", None),
                 split_csv=proto_cfg.split_csv, class_names=list(proto_cfg.class_names),
-                crop_size=proto_cfg.get("crop_size", 224), in_chans=cfg.student.in_chans,
-                device="cuda",
+                # teacher-style views need ~2x the global crop size stored, so
+                # the 1xD zoom is a native crop (see src/train/labeled_views.py)
+                crop_size=(proto_cfg.get("store_size", 448) if proto_cfg.get("augment", False)
+                           else proto_cfg.get("crop_size", 224)),
+                in_chans=cfg.student.in_chans, device="cuda",
             )
             self._proto_rng = np.random.RandomState(proto_cfg.get("seed", 0))
+            self.proto_views = None
+            if proto_cfg.get("augment", False):
+                from src.train.labeled_views import TeacherStyleViews
+                self.proto_views = TeacherStyleViews(cfg.crops, in_chans=cfg.student.in_chans)
+                self.proto_n_query = proto_cfg.get("n_query_per_class", 32)
+                logger.info(f"OPTIONS -- PROTO -- teacher-style views, balanced episodes: "
+                            f"{self.proto_n_support} support + {self.proto_n_query} query per class")
+
+        # Ordinal supervised-contrastive auxiliary loss (src/train/supcon_loss.py)
+        # - same optional-section convention as proto; draws the same
+        # train_pool craters, class-balanced, two augmented views each.
+        supcon_cfg = cfg.get("supcon", None)
+        self.do_supcon = bool(supcon_cfg) and supcon_cfg.get("enabled", False)
+        if self.do_supcon:
+            from src.train.prototypical_loss import LabeledEpisodePool
+            from src.train.supcon_loss import SupConSampler
+
+            logger.info(f"OPTIONS -- SUPCON -- enabled: weight={supcon_cfg.loss_weight} "
+                        f"tau={supcon_cfg.tau} ordinal_sigma={supcon_cfg.ordinal_sigma} "
+                        f"per_class={supcon_cfg.per_class}")
+            self.supcon_loss_weight = supcon_cfg.loss_weight
+            self.supcon_tau, self.supcon_sigma = supcon_cfg.tau, supcon_cfg.ordinal_sigma
+            pool = LabeledEpisodePool(
+                dat_path=None, metadata_csv=None, catalog=supcon_cfg.catalog,
+                split_csv=supcon_cfg.split_csv, class_names=list(supcon_cfg.class_names),
+                crop_size=(supcon_cfg.get("store_size", 448) if supcon_cfg.get("teacher_views", False)
+                           else supcon_cfg.get("crop_size", 224)),
+                in_chans=cfg.student.in_chans, device="cuda")
+            views = None
+            if supcon_cfg.get("teacher_views", False):
+                from src.train.labeled_views import TeacherStyleViews
+                views = TeacherStyleViews(cfg.crops, in_chans=cfg.student.in_chans)
+                logger.info("OPTIONS -- SUPCON -- teacher-style views (context + zoom)")
+            self.supcon_sampler = SupConSampler(
+                pool, per_class=supcon_cfg.per_class, zoom_min=supcon_cfg.zoom_min,
+                jitter=supcon_cfg.jitter, seed=supcon_cfg.get("seed", 0), views=views)
 
         logger.info("OPTIONS -- DINO")
         if self.do_dino:
@@ -414,7 +455,11 @@ class SSLMetaArch(nn.Module):
 
             if self.do_koleo:
                 koleo_loss = self.cfg.dino.koleo_loss_weight * sum(
-                    self.koleo_loss(p) for p in student_cls_tokens.chunk(2)
+                    # .float(): KoLeoLoss disables autocast but would still run
+                    # on an fp16 tensor, where its eps=1e-8 underflows - two
+                    # identical crops (context_zoom's fixed global view of a
+                    # crater drawn twice) then give log(0) = inf loss.
+                    self.koleo_loss(p.float()) for p in student_cls_tokens.chunk(2)
                 )  # we don't apply koleo loss between cls tokens of a same image
                 loss_accumulator += koleo_loss
                 loss_dict["koleo_loss"] = (
@@ -444,7 +489,20 @@ class SSLMetaArch(nn.Module):
         if self.do_proto:
             from src.train.prototypical_loss import prototypical_loss
 
-            sx, sy, qx, qy = self.proto_pool.sample(self.proto_n_support, self._proto_rng)
+            if self.proto_views is not None:
+                from src.train.prototypical_loss import sample_balanced_episode_idx
+                si, qi = sample_balanced_episode_idx(
+                    self.proto_pool.pool_y, self.proto_pool.n_classes,
+                    self.proto_n_support, self.proto_n_query, self._proto_rng)
+                px, py = self.proto_pool.pool_x, self.proto_pool.pool_y
+                dev = px.device
+                s1, s2 = self.proto_views(px[torch.as_tensor(si, device=dev)])
+                q1, q2 = self.proto_views(px[torch.as_tensor(qi, device=dev)])
+                sx, qx = torch.cat([s1, s2]), torch.cat([q1, q2])
+                sy = torch.as_tensor(np.r_[py[si], py[si]], dtype=torch.long, device=dev)
+                qy = torch.as_tensor(np.r_[py[qi], py[qi]], dtype=torch.long, device=dev)
+            else:
+                sx, sy, qx, qy = self.proto_pool.sample(self.proto_n_support, self._proto_rng)
             proto_loss = prototypical_loss(
                 self.student.backbone, sx, sy, qx, qy, self.proto_pool.n_classes)
             # summed into the SAME loss_accumulator backprop_loss() below
@@ -457,6 +515,16 @@ class SSLMetaArch(nn.Module):
             # it's meant as a gentle nudge, not an equal-weight objective.
             loss_accumulator += self.proto_loss_weight * proto_loss
             loss_dict["proto_loss"] = proto_loss.detach()
+
+        if self.do_supcon:
+            from src.train.supcon_loss import ordinal_supcon_loss
+
+            sx, sy = self.supcon_sampler.sample()
+            supcon_loss = ordinal_supcon_loss(self.student.backbone(sx), sy,
+                                              tau=self.supcon_tau, sigma=self.supcon_sigma)
+            # same single loss_accumulator / one backward as proto (FSDP)
+            loss_accumulator += self.supcon_loss_weight * supcon_loss
+            loss_dict["supcon_loss"] = supcon_loss.detach()
 
         self.backprop_loss(loss_accumulator)
 

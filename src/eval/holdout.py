@@ -20,11 +20,30 @@ import os
 import numpy as np
 
 
-def load_holdout_dat(path: str, num_channels: int = 1, size: int = 128) -> np.memmap:
-    """Mirrors src/train/train.py's load_memmap."""
+def load_holdout_dat(path: str, num_channels: int = 1, size: int | None = None) -> np.memmap:
+    """Mirrors src/train/train.py's load_memmap.
+
+    The .dat is headerless, so its crop size cannot be read from the file.
+    If an evalset_manifest.json sits beside it (catalog_to_evalset writes
+    one) its size/channels are authoritative - a Kaguya eval set is 224 px,
+    and reshaping it as 128 would silently scramble every crop. An explicit
+    `size` that contradicts the manifest raises. Without a manifest (older
+    preprocess_2 sets) the size is `size`, default 128 as before.
+    """
+    import json
+    man = os.path.join(os.path.dirname(path), "evalset_manifest.json")
+    if os.path.exists(man):
+        m = json.load(open(man))
+        if size is not None and int(m["size"]) != size:
+            raise ValueError(f"{path}: evalset_manifest.json says {m['size']} px, caller asked {size}")
+        size, num_channels = int(m["size"]), int(m.get("channels", num_channels))
+    size = 128 if size is None else size
     file_size = os.path.getsize(path)
     total_floats = file_size // 4
     n_pixels = num_channels * size * size
+    if total_floats % n_pixels:
+        raise ValueError(f"{path}: {total_floats} floats is not a whole number of "
+                         f"{num_channels}x{size}x{size} crops - wrong size?")
     n = total_floats // n_pixels
     return np.memmap(path, dtype=np.float32, mode="r", shape=(n, num_channels, size, size))
 
